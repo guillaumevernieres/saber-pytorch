@@ -1,0 +1,50 @@
+# Minimal test / smoke-test config — quick to run on any dataset.
+#
+# Usage:
+#   python scripts/train_ml_balance.py --config configs/test.yaml \
+#       --data-path data/aice_training.npz
+
+model:
+  hidden_size: 16
+  hidden_layers: 2
+  activation: gelu
+
+variables:
+  input_variables:
+    - sst
+    - sss
+    - tair
+    - hi
+    - hs
+  output_variables:
+    - aice
+
+domain:
+  mask_mode: both
+  min_ice_concentration: 0.0
+
+data:
+  data_path: data/aice_training.npz
+  validation_split: 0.1
+  num_workers: 0
+  max_patterns: 5000
+  thin_fraction: 1.0
+
+training:
+  epochs: 100
+  batch_size: 256
+  optimizer:
+    type: adam
+    learning_rate: 0.001
+  scheduler: null
+  loss_function: mse
+  early_stopping_patience: 20
+  save_interval: 50
+  track_jacobian: true
+  jacobian_freq: 10
+  use_log_scale_loss: true
+
+output:
+  model_dir: models_test/
+
+use_cuda: false

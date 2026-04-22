@@ -1,0 +1,72 @@
+# ML balance emulator — sea ice concentration (aice)
+#
+# Predict sea ice concentration from 14 surface/near-surface variables.
+# Domain: sea-ice points only (aice > min_ice_concentration).
+#
+# Typical workflow:
+#   python scripts/prepare_training_data.py \
+#       --config configs/aice.yaml \
+#       --atm path/to/atm.nc --ocn path/to/ice_ocean.nc \
+#       --output data/aice_training.npz
+#
+#   python scripts/train_ml_balance.py --config configs/aice.yaml \
+#       --data-path data/aice_training.npz
+#
+#   python scripts/build_ml_balance_emulator.py \
+#       --checkpoint models_aice/best_model.pt \
+#       --output ml_balance_aice.ts
+
+model:
+  hidden_size: 64
+  hidden_layers: 3
+  activation: gelu
+
+variables:
+  input_variables:
+    - sst       # sea surface temperature
+    - sss       # sea surface salinity
+    - tair      # near-surface air temperature
+    - tsfc      # surface skin temperature
+    - hi        # sea ice thickness
+    - hs        # snow-on-ice thickness
+    - sice      # sea ice salinity
+    - uocn      # ocean surface u-velocity
+    - vocn      # ocean surface v-velocity
+    - uatm      # near-surface wind u
+    - vatm      # near-surface wind v
+    - qref      # 2-m specific humidity
+    - flwdn     # downward longwave flux
+    - fswdn     # downward shortwave flux
+  output_variables:
+    - aice      # sea ice area fraction
+
+domain:
+  mask_mode: sea_ice           # train on sea-ice-covered points only
+  min_ice_concentration: 0.0   # include all ice fractions ≥ 0
+
+data:
+  data_path: data/aice_training.npz
+  validation_split: 0.1
+  num_workers: 0
+  max_patterns: 400000
+  thin_fraction: 1.0
+
+training:
+  epochs: 100000
+  batch_size: 1000
+  optimizer:
+    type: adam
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+  scheduler: null            # constant learning rate
+  loss_function: mse
+  early_stopping_patience: 50
+  save_interval: 20
+  track_jacobian: true
+  jacobian_freq: 5
+  use_log_scale_loss: true
+
+output:
+  model_dir: models_aice/
+
+use_cuda: true

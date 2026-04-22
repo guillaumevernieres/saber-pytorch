@@ -1,0 +1,51 @@
+# ML balance emulator — sea ice concentration, both domain
+#
+# Same target as aice.yaml but trains on both sea-ice AND open-ocean points
+# (mask_mode: both).  Useful when the background state spans mixed regions.
+# Reduces the input set to 5 variables for a lighter model.
+
+model:
+  hidden_size: 64
+  hidden_layers: 3
+  activation: gelu
+
+variables:
+  input_variables:
+    - sst
+    - sss
+    - tair
+    - hi
+    - hs
+  output_variables:
+    - aice
+
+domain:
+  mask_mode: both
+  min_ice_concentration: 0.05  # ice/ocean boundary threshold
+
+data:
+  data_path: data/both_training.npz
+  validation_split: 0.1
+  num_workers: 0
+  max_patterns: 400000
+  thin_fraction: 0.1           # subsample to keep runtime reasonable
+
+training:
+  epochs: 10000
+  batch_size: 1000
+  optimizer:
+    type: adam
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+  scheduler: null
+  loss_function: mse
+  early_stopping_patience: 50
+  save_interval: 20
+  track_jacobian: true
+  jacobian_freq: 5
+  use_log_scale_loss: true
+
+output:
+  model_dir: models_both/
+
+use_cuda: true
