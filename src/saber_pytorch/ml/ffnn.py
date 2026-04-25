@@ -237,9 +237,9 @@ class FFNN(nn.Module):
     def save_norm(self, path: str) -> None:
         """Save normalization buffers to a separate file.
 
-        The file is read by build_ml_balance_emulator.py when constructing
-        the TorchScript export.  Format mirrors the aibalance convention so
-        that existing checkpoints remain loadable.
+        The file is read by the surface/vertical ML-balance builder scripts
+        when constructing the TorchScript export.  Format mirrors the
+        aibalance convention so that existing checkpoints remain loadable.
         """
         torch.save(
             {

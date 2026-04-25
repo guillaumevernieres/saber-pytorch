@@ -19,24 +19,22 @@ SABER TorchBalance contract (setupVerticalEmulator)
 The emulator is a TorchScript module with:
 
   Attributes:
-    input_names  : List[str]  — 4 variable names: [T, S, dz, depth]
+    input_names  : List[str]  — 3 variable names: [T, S, dz]
     output_names : List[str]  — exactly one output variable name (SSH)
 
   Method called by C++:
-    jac_physical(inputs: Tensor, mask: Tensor) -> Tensor
+    jac_physical(inputs: Tensor, mask: Tensor, row_indices: Tensor, col_indices: Tensor) -> Tensor
 
   inputs is packed by the C++ as all levels of each input_names entry:
     inputs[:, 0*nlevels : 1*nlevels] = T background profiles
     inputs[:, 1*nlevels : 2*nlevels] = S background profiles
     inputs[:, 2*nlevels : 3*nlevels] = dz (layer thicknesses, m)
-    inputs[:, 3*nlevels : 4*nlevels] = depth (mid-level depths, m)
 
-  Return shape: [nnodes, 1, 4*nlevels]
-    Full column layout:
+  Return shape: [nnodes, nRequestedPairs]
+    Compact column layout:
       0*nlevels : 1*nlevels  = ∂η/∂T    (non-zero)
       1*nlevels : 2*nlevels  = ∂η/∂S    (non-zero)
       2*nlevels : 3*nlevels  = ∂η/∂dz   (zeros — geometry, not DA state)
-      3*nlevels : 4*nlevels  = ∂η/∂depth (zeros — geometry, not DA state)
 
 Python-friendly interface
 -------------------------
@@ -206,6 +204,7 @@ class StericHeightEmulator(nn.Module):
         self,
         inputs: torch.Tensor,
         mask: torch.Tensor,
+        requested_row_indices: torch.Tensor,
         requested_col_indices: torch.Tensor,
     ) -> torch.Tensor:
         """Jacobian from the packed background tensor assembled by SABER C++.
@@ -218,17 +217,18 @@ class StericHeightEmulator(nn.Module):
         Args:
             inputs:                [nnodes, 3*nlevels].
             mask:                  [nnodes, 1].
+            requested_row_indices: 1-D int64 tensor of output row indices.
             requested_col_indices: 1-D int64 tensor of column indices into the
                                    full [nnodes, 1, 3*nlevels] Jacobian.
-                                   Built by setupVerticalEmulator from the YAML
-                                   "jacobian wrt" list.
 
         Returns:
-            jac: [nnodes, 1, len(requested_col_indices)].
+            jac: [nnodes, len(requested_col_indices)].
         """
         n = inputs.shape[1] // 3
         T_bg = inputs[:, 0*n:1*n]
         S_bg = inputs[:, 1*n:2*n]
         dz   = inputs[:, 2*n:3*n]
         jac_full = self._compute_jacobian(T_bg, S_bg, dz, mask)
-        return jac_full[:, :, requested_col_indices]
+        jac_rows = jac_full.index_select(1, requested_row_indices)
+        gather_cols = requested_col_indices.view(1, -1, 1).expand(jac_full.shape[0], -1, 1)
+        return jac_rows.gather(2, gather_cols).squeeze(2)

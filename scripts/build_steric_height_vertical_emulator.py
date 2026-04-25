@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and save a TorchScript steric height emulator.
+"""Build and save a TorchScript steric-height vertical emulator.
 
 dz (layer thicknesses) is passed as a regular Atlas input field by SABER at
 runtime, alongside T and S.  Mid-level depths are derived inside the emulator
@@ -7,7 +7,7 @@ from dz, so no separate depth field is needed.
 
 Usage
 -----
-    python build_emulator.py \\
+    python scripts/build_steric_height_vertical_emulator.py \\
         --output   steric_height_emulator.ts \\
         [--T-name  sea_water_potential_temperature] \\
         [--S-name  sea_water_salinity] \\
@@ -58,6 +58,22 @@ def build_and_save(
     scripted = torch.jit.script(emulator)
     scripted.save(output_path)
 
+    loaded = torch.jit.load(output_path)
+    nlevels = 4
+    test_inputs = torch.randn(2, 3 * nlevels)
+    test_mask = torch.ones(2, 1)
+    test_col_indices = torch.arange(3 * nlevels, dtype=torch.long)
+    test_row_indices = torch.zeros_like(test_col_indices)
+    test_jac = loaded.jac_physical(
+        test_inputs, test_mask, test_row_indices, test_col_indices
+    )
+    expected_shape = (2, 3 * nlevels)
+    if tuple(test_jac.shape) != expected_shape:
+        raise RuntimeError(
+            f"Verification failed: expected jac shape {expected_shape}, "
+            f"got {tuple(test_jac.shape)}"
+        )
+
     print(f"Saved: {output_path}")
     print(f"  input_names : {input_names}")
     print(f"  output_names: {output_names}")
@@ -65,14 +81,15 @@ def build_and_save(
     print(f"    [:, 0*n:1*n] = {T_name}")
     print(f"    [:, 1*n:2*n] = {S_name}")
     print(f"    [:, 2*n:3*n] = {dz_name}")
-    print(f"  jac shape   : [nnodes, 1, 3*nlevels]")
+    print(f"  jac shape   : [nnodes, nRequestedPairs]")
+    print(f"  jac request : row_indices and col_indices select compact Jacobian entries")
     print(f"  Note: Jacobian columns for {dz_name} are zero (geometry).")
     print(f"  Note: depth_m is derived from {dz_name} as cumsum(dz) - dz/2.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build steric height TorchScript emulator"
+        description="Build steric-height vertical TorchScript emulator"
     )
     parser.add_argument("--output", required=True, help="Output .ts path")
     parser.add_argument("--T-name", default="sea_water_potential_temperature")

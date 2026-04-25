@@ -1,9 +1,9 @@
 """Tests for StericHeightEmulator.
 
 The emulator takes 3 input fields [T, S, dz]; mid-level depths are derived
-from dz on the fly.  The C++ entry point jac_physical() accepts a third
-argument (requested_col_indices) that selects columns from the full
-[nnodes, 1, 3*nlevels] Jacobian.
+from dz on the fly.  The C++ entry point jac_physical() accepts row and column
+indices that select compact entries from the full [nnodes, 1, 3*nlevels]
+Jacobian.
 
 Validates:
 1. forward() — nonlinear steric SSH shape and sign
@@ -55,6 +55,11 @@ def all_col_indices(nlevels: int = NLEVELS) -> torch.Tensor:
     return torch.arange(3 * nlevels, dtype=torch.long)
 
 
+def output_row_indices(col_indices: torch.Tensor) -> torch.Tensor:
+    """Steric height has one output row, so all requested pairs use row zero."""
+    return torch.zeros_like(col_indices)
+
+
 # ------------------------------------------------------------------
 # depth_to_pressure utility
 # ------------------------------------------------------------------
@@ -96,15 +101,17 @@ def test_jac_physical_shape():
     em = make_emulator()
     inputs = state_to_packed(make_state())
     mask = torch.ones(NNODES, 1)
-    jac = em.jac_physical(inputs, mask, all_col_indices())
-    assert jac.shape == (NNODES, 1, 3 * NLEVELS)
+    cols = all_col_indices()
+    jac = em.jac_physical(inputs, mask, output_row_indices(cols), cols)
+    assert jac.shape == (NNODES, 3 * NLEVELS)
 
 
 def test_jac_physical_masked_is_zero():
     em = make_emulator()
     inputs = state_to_packed(make_state())
     mask = torch.zeros(NNODES, 1)
-    jac = em.jac_physical(inputs, mask, all_col_indices())
+    cols = all_col_indices()
+    jac = em.jac_physical(inputs, mask, output_row_indices(cols), cols)
     assert torch.all(jac == 0.0)
 
 
@@ -113,8 +120,9 @@ def test_dz_jacobian_columns_are_zero():
     em = make_emulator()
     inputs = state_to_packed(make_state())
     mask = torch.ones(NNODES, 1)
-    jac = em.jac_physical(inputs, mask, all_col_indices())
-    assert torch.all(jac[:, :, 2 * NLEVELS:] == 0.0)
+    cols = all_col_indices()
+    jac = em.jac_physical(inputs, mask, output_row_indices(cols), cols)
+    assert torch.all(jac[:, 2 * NLEVELS:] == 0.0)
 
 
 def test_jac_physical_col_selection():
@@ -123,10 +131,11 @@ def test_jac_physical_col_selection():
     inputs = state_to_packed(make_state())
     mask = torch.ones(NNODES, 1)
     t_indices = torch.arange(NLEVELS, dtype=torch.long)
-    jac_t = em.jac_physical(inputs, mask, t_indices)
-    assert jac_t.shape == (NNODES, 1, NLEVELS)
-    jac_full = em.jac_physical(inputs, mask, all_col_indices())
-    assert torch.allclose(jac_t, jac_full[:, :, :NLEVELS])
+    jac_t = em.jac_physical(inputs, mask, output_row_indices(t_indices), t_indices)
+    assert jac_t.shape == (NNODES, NLEVELS)
+    cols = all_col_indices()
+    jac_full = em.jac_physical(inputs, mask, output_row_indices(cols), cols)
+    assert torch.allclose(jac_t, jac_full[:, :NLEVELS])
 
 
 # ------------------------------------------------------------------
@@ -146,7 +155,9 @@ def test_jac_from_state_matches_jac_physical():
     state = make_state()
     mask = torch.ones(NNODES, 1)
     jac_dict   = em.jac_from_state(state, mask)
-    jac_packed = em.jac_physical(state_to_packed(state), mask, all_col_indices())
+    cols = all_col_indices()
+    jac_packed = em.jac_physical(state_to_packed(state), mask, output_row_indices(cols), cols)
+    jac_packed = jac_packed.unsqueeze(1)
     assert torch.allclose(jac_dict, jac_packed)
 
 
@@ -160,7 +171,8 @@ def test_jac_finite_difference():
     state = {k: v[:1].to(torch.float64) for k, v in make_state(nnodes=1).items()}
     inputs = state_to_packed(state)
     mask = torch.ones(1, 1, dtype=torch.float64)
-    jac = em.jac_physical(inputs, mask, all_col_indices(NLEVELS))
+    cols = all_col_indices(NLEVELS)
+    jac = em.jac_physical(inputs, mask, output_row_indices(cols), cols)
 
     eps = 1e-4
     # Only check T columns (0..nlevels) and S columns (nlevels..2*nlevels)
@@ -168,7 +180,7 @@ def test_jac_finite_difference():
         dv = torch.zeros_like(inputs)
         dv[0, j] = eps
         fd = ((em(inputs + dv) - em(inputs - dv)) / (2 * eps)).item()
-        an = jac[0, 0, j].item()
+        an = jac[0, j].item()
         assert abs(an - fd) < 1e-4 * abs(fd) + 1e-12, (
             f"FD mismatch at input index {j}: analytical={an:.6e}, FD={fd:.6e}"
         )
@@ -183,9 +195,10 @@ def test_adjoint_dot_product():
     em = make_emulator()
     state = make_state(nnodes=1)
     mask = torch.ones(1, 1)
+    cols = all_col_indices()
     jac = em.jac_physical(
-        state_to_packed(state), mask, all_col_indices()
-    )[0, 0, :2 * NLEVELS]
+        state_to_packed(state), mask, output_row_indices(cols), cols
+    )[0, :2 * NLEVELS]
 
     dx = torch.randn(2 * NLEVELS)
     dy = torch.randn(1)
@@ -204,8 +217,9 @@ def test_torchscript_compilable():
     scripted = torch.jit.script(em)
     inputs = state_to_packed(make_state())
     mask = torch.ones(NNODES, 1)
-    jac = scripted.jac_physical(inputs, mask, all_col_indices())
-    assert jac.shape == (NNODES, 1, 3 * NLEVELS)
+    cols = all_col_indices()
+    jac = scripted.jac_physical(inputs, mask, output_row_indices(cols), cols)
+    assert jac.shape == (NNODES, 3 * NLEVELS)
 
 
 def test_torchscript_jac_from_state():
@@ -229,12 +243,13 @@ def test_torchscript_save_load_roundtrip():
     scripted = torch.jit.script(em)
     inputs = state_to_packed(make_state())
     mask = torch.ones(NNODES, 1)
-    jac_before = scripted.jac_physical(inputs, mask, all_col_indices())
+    cols = all_col_indices()
+    jac_before = scripted.jac_physical(inputs, mask, output_row_indices(cols), cols)
 
     with tempfile.NamedTemporaryFile(suffix=".ts") as f:
         scripted.save(f.name)
         loaded = torch.jit.load(f.name)
-        jac_after = loaded.jac_physical(inputs, mask, all_col_indices())
+        jac_after = loaded.jac_physical(inputs, mask, output_row_indices(cols), cols)
 
     assert torch.allclose(jac_before, jac_after)
     assert loaded.input_names == scripted.input_names

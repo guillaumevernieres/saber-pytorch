@@ -8,13 +8,13 @@ result as a compressed .npz file suitable for train_ml_balance.py.
 Usage
 -----
     python scripts/prepare_training_data.py \\
-        --config   configs/aice.yaml        \\
+        --config   emulators/aice/config.yaml        \\
         --atm      /path/to/atm.nc          \\
         --ocn      /path/to/ice_ocean.nc    \\
         --output   data/training_aice.npz
 
 Atmosphere file is optional; omit --atm if your config uses ocean-only
-inputs (e.g. configs/both_domain.yaml without atmospheric variables).
+inputs (e.g. emulators/aice/both_domain.yaml without atmospheric variables).
 
 The output .npz contains:
     inputs       : float32 [N, input_size]   — raw physical values
@@ -38,7 +38,7 @@ _SRC = str(Path(__file__).resolve().parents[1] / "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from saber_pytorch.ml.data import IceDataPreparer  # noqa: E402
+from saber_pytorch.ml.data import UFSEmulatorDataBuilder  # noqa: E402
 from saber_pytorch.ml.training import load_config  # noqa: E402
 
 
@@ -82,7 +82,7 @@ def main() -> None:
         args.thin_fraction or data_cfg.get("thin_fraction", 1.0)
     )
 
-    preparer = IceDataPreparer(config)
+    preparer = UFSEmulatorDataBuilder(config)
     result = preparer.prepare_training_data(
         atm_file=args.atm,
         ocn_file=args.ocn,

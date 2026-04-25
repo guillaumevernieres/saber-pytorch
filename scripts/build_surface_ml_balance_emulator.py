@@ -49,9 +49,9 @@ priority order:
 
 Usage
 -----
-    python build_ml_balance_emulator.py \\
+    python scripts/build_surface_ml_balance_emulator.py \\
         --checkpoint  /path/to/best_model.pt \\
-        --output      ml_balance.ts \\
+        --output      surface_ml_balance.ts \\
         [--input-cf   "sst:sea_water_potential_temperature,sss:sea_water_salinity"] \\
         [--output-cf  "aice:sea_ice_area_fraction"] \\
         [--input-levels  "0,0,0"]   \\   # comma-sep int per input feature
@@ -66,7 +66,6 @@ from typing import Dict, List, Optional
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from saber_pytorch.ml.ffnn import FFNN
 from saber_pytorch.ml.ml_balance import FFNNSurfaceEmulator
 
 
@@ -244,6 +243,7 @@ def build_and_save(
     print(f"  input_levels          : {input_levels}")
     print(f"  output_names ({output_size}): {output_names}")
     print(f"  output_levels         : {output_levels}")
+    print(f"  emulator type: surface ML balance")
     print(f"  architecture: {hidden_layers}×{hidden_size}, activation={activation}")
     print(f"  jac_physical shape at runtime: [nnodes, {output_size}, {input_size}]")
 

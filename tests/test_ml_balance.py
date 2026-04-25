@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from saber_pytorch.ml.ffnn import FFNN
-from saber_pytorch.ml.ml_balance import FFNNSurfaceEmulator
+from saber_pytorch.ml.ml_balance import FFNNSalinityProfileEmulator, FFNNSurfaceEmulator
 
 
 # ------------------------------------------------------------------
@@ -321,3 +321,111 @@ def test_torchscript_mask_preserved_after_load():
     jac_zero = loaded.jac_physical(inputs, mask_zero)
     assert not torch.all(jac_full == 0.0)
     assert torch.all(jac_zero == 0.0)
+
+
+# ------------------------------------------------------------------
+# Salinity profile reduced-grid tests
+# ------------------------------------------------------------------
+
+def test_salinity_profile_interpolates_temperature_to_reduced_grid():
+    em = FFNNSalinityProfileEmulator(
+        temperature_variable_name="sea_water_potential_temperature",
+        thickness_variable_name="h",
+        output_variable_name="sea_water_salinity",
+        source_num_levels=5,
+        target_num_levels=3,
+        hidden_size=4,
+        hidden_layers=1,
+        activation="relu",
+    )
+    temp = torch.tensor([[10.0, 20.0, 9999.0, 40.0, -9999.0]])
+    thickness = torch.tensor([[1.0, 1.0, 0.0, 2.0, 0.0]])
+    inputs = torch.cat([temp, thickness], dim=1)
+
+    reduced = em.reduced_temperature_inputs(inputs)
+
+    expected = torch.tensor([[10.0, 23.333333, 40.0]])
+    assert torch.allclose(reduced, expected, atol=1e-5)
+
+
+def test_salinity_profile_ignores_thin_layer_temperature_fill_values():
+    em = FFNNSalinityProfileEmulator(
+        temperature_variable_name="sea_water_potential_temperature",
+        thickness_variable_name="h",
+        output_variable_name="sea_water_salinity",
+        source_num_levels=5,
+        target_num_levels=3,
+        hidden_size=4,
+        hidden_layers=1,
+        activation="relu",
+    )
+    thickness = torch.tensor([[1.0, 1.0, 0.1, 2.0, 0.0]])
+    with_fill = torch.cat(
+        [torch.tensor([[10.0, 20.0, 9999.0, 40.0, -9999.0]]), thickness],
+        dim=1,
+    )
+    without_fill = torch.cat(
+        [torch.tensor([[10.0, 20.0, 30.0, 40.0, 50.0]]), thickness],
+        dim=1,
+    )
+
+    reduced_with_fill = em.reduced_temperature_inputs(with_fill)
+    reduced_without_fill = em.reduced_temperature_inputs(without_fill)
+
+    assert torch.isfinite(reduced_with_fill).all()
+    assert torch.allclose(reduced_with_fill, reduced_without_fill, atol=1e-5)
+
+
+def test_salinity_profile_output_and_jacobian_contract_shapes():
+    em = FFNNSalinityProfileEmulator(
+        temperature_variable_name="sea_water_potential_temperature",
+        thickness_variable_name="h",
+        output_variable_name="sea_water_salinity",
+        source_num_levels=5,
+        target_num_levels=3,
+        hidden_size=4,
+        hidden_layers=1,
+        activation="relu",
+    )
+    temp = torch.tensor([[10.0, 20.0, 30.0, 40.0, 50.0]]).repeat(2, 1)
+    thickness = torch.tensor([[1.0, 1.0, 1.0, 1.0, 1.0]]).repeat(2, 1)
+    inputs = torch.cat([temp, thickness], dim=1)
+
+    salinity = em(inputs)
+    assert salinity.shape == (2, 3)
+
+    mask = torch.ones(2, 1)
+    row_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+    col_indices = torch.tensor([0, 1, 4], dtype=torch.long)
+    jac = em.jac_physical(inputs, mask, row_indices, col_indices)
+    assert jac.shape == (2, 3)
+
+
+def test_salinity_profile_torchscript_save_load_roundtrip():
+    em = FFNNSalinityProfileEmulator(
+        temperature_variable_name="sea_water_potential_temperature",
+        thickness_variable_name="h",
+        output_variable_name="sea_water_salinity",
+        source_num_levels=5,
+        target_num_levels=3,
+        hidden_size=4,
+        hidden_layers=1,
+        activation="relu",
+    )
+    scripted = torch.jit.script(em)
+    temp = torch.tensor([[10.0, 20.0, 30.0, 40.0, 50.0]]).repeat(2, 1)
+    thickness = torch.tensor([[1.0, 1.0, 1.0, 1.0, 1.0]]).repeat(2, 1)
+    inputs = torch.cat([temp, thickness], dim=1)
+    mask = torch.ones(2, 1)
+    row_indices = torch.tensor([0, 1, 2], dtype=torch.long)
+    col_indices = torch.tensor([0, 1, 4], dtype=torch.long)
+    jac_before = scripted.jac_physical(inputs, mask, row_indices, col_indices)
+
+    with tempfile.NamedTemporaryFile(suffix=".ts") as f:
+        scripted.save(f.name)
+        loaded = torch.jit.load(f.name)
+        jac_after = loaded.jac_physical(inputs, mask, row_indices, col_indices)
+
+    assert torch.allclose(jac_before, jac_after)
+    assert loaded.input_names == ["sea_water_potential_temperature", "h"]
+    assert loaded.output_names == ["sea_water_salinity"]

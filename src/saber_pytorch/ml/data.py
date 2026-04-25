@@ -1,7 +1,6 @@
 """
-Data preparation utilities for IceNet training.
-Refactored to support CF-1 NetCDF inputs from separate atmosphere and ocean/ice files.
-Minimized code and error handling per request.
+Data preparation utilities for UFS emulator training.
+Supports CF-1 NetCDF inputs from separate atmosphere and ocean/ice files.
 """
 
 import numpy as np
@@ -12,7 +11,7 @@ from pathlib import Path
 from .cf_mappings import CF_ATM, CF_OCN, DEFAULT_ATM_LEVEL
 
 
-class IceDataPreparer:
+class UFSEmulatorDataBuilder:
     """
     Prepares training data from CF-1 NetCDF files (atmosphere + ocean/ice).
     """
@@ -21,6 +20,10 @@ class IceDataPreparer:
         self.config = config
         dcfg = config.get('domain', {})
         vcfg = config.get('variables', {})
+        mcfg = config.get('model', {})
+        self.emulator_type = mcfg.get('emulator_type', 'vertical')
+        self.target_num_levels = vcfg.get('target_num_levels')
+        self.min_layer_thickness = 0.1
         self.min_ice = dcfg.get('min_ice_concentration', 0.0)
         self.use_synthetic = dcfg.get('use_synthetic_data', False)
         self.mask_mode = dcfg.get('mask_mode', 'sea_ice')
@@ -37,6 +40,9 @@ class IceDataPreparer:
         # CF-1 variable map (imported from cf_mappings module)
         self.cf_atm = CF_ATM
         self.cf_ocn = CF_OCN
+
+    def _uses_salinity_profile_emulator(self) -> bool:
+        return self.emulator_type == 'salinity_profile'
 
     def _read_var(self, ds, name):
         """Read variable from NetCDF, converting masked arrays to regular arrays with NaN for fill values."""
@@ -68,8 +74,8 @@ class IceDataPreparer:
         else:
             # Coordinates from ocean file
             # Try different possible coordinate names
-            lat_names = ['latitude', 'yh', 'lat', 'y', 'yaxis_1', 'yaxis_2']
-            lon_names = ['longitude', 'xh', 'lon', 'x', 'xaxis_1', 'xaxis_2']
+            lat_names = ['latitude', 'geolat', 'yh', 'ny', 'lat', 'y', 'yaxis_1', 'yaxis_2']
+            lon_names = ['longitude', 'geolon', 'xh', 'nx', 'lon', 'x', 'xaxis_1', 'xaxis_2']
 
             lat = None
             for name in lat_names:
@@ -78,7 +84,11 @@ class IceDataPreparer:
                     print(f"  Found latitude coordinate: '{name}'")
                     break
             if lat is None:
-                raise ValueError(f"Latitude coordinate not found. Tried: {lat_names}. Available: {list(do.variables.keys())[:20]}")
+                if 'ny' in do.dimensions:
+                    lat = np.arange(len(do.dimensions['ny']), dtype=np.float32)
+                    print("  Latitude coordinate not found; using ny index coordinate")
+                else:
+                    raise ValueError(f"Latitude coordinate not found. Tried: {lat_names}. Available: {list(do.variables.keys())[:20]}")
 
             lon = None
             for name in lon_names:
@@ -87,7 +97,11 @@ class IceDataPreparer:
                     print(f"  Found longitude coordinate: '{name}'")
                     break
             if lon is None:
-                raise ValueError(f"Longitude coordinate not found. Tried: {lon_names}. Available: {list(do.variables.keys())[:20]}")
+                if 'nx' in do.dimensions:
+                    lon = np.arange(len(do.dimensions['nx']), dtype=np.float32)
+                    print("  Longitude coordinate not found; using nx index coordinate")
+                else:
+                    raise ValueError(f"Longitude coordinate not found. Tried: {lon_names}. Available: {list(do.variables.keys())[:20]}")
 
         # Broadcast to 2D
         lat2 = np.repeat(lat[:, None], lon.size, axis=1)
@@ -396,9 +410,81 @@ class IceDataPreparer:
 
         return valid_profiles
 
+    def _check_salinity_profile_valid_values(self, data: Dict[str, np.ndarray]) -> np.ndarray:
+        """Validate salinity-profile data only on sufficiently thick source levels."""
+        fill_threshold = 9000.0
+        n_spatial = len(data['lat'])
+        valid_profiles = np.ones(n_spatial, dtype=bool)
+
+        thickness = data['h']
+        valid_thickness = (
+            np.isfinite(thickness)
+            & (thickness > self.min_layer_thickness)
+        )
+        valid_profiles &= np.any(valid_thickness, axis=1)
+
+        for var in ('Temp', 'Salt'):
+            values = data[var]
+            valid_values = np.isfinite(values) & (np.abs(values) < fill_threshold)
+            valid_profiles &= ~np.any(valid_thickness & ~valid_values, axis=1)
+            valid_profiles &= np.any(valid_thickness & valid_values, axis=1)
+
+        n_valid = np.sum(valid_profiles)
+        print(
+            f"  QC: Keeping {n_valid}/{n_spatial} salinity profiles "
+            f"({100*n_valid/n_spatial:.1f}%)"
+        )
+        return valid_profiles
+
+    def _interp_profiles_to_target_grid(
+        self,
+        values: np.ndarray,
+        thickness: np.ndarray,
+    ) -> np.ndarray:
+        """Interpolate profiles to the salinity emulator's reduced vertical grid."""
+        if self.target_num_levels is None:
+            raise ValueError("target_num_levels is required for salinity_profile")
+
+        fill_threshold = 9000.0
+        target_levels = int(self.target_num_levels)
+        reduced = np.zeros((values.shape[0], target_levels), dtype=np.float32)
+
+        valid_thickness = (
+            np.isfinite(thickness)
+            & (thickness > self.min_layer_thickness)
+        )
+        safe_thickness = np.where(valid_thickness, thickness, 0.0).astype(np.float32)
+        depths = np.cumsum(safe_thickness, axis=1) - 0.5 * safe_thickness
+        valid_values = np.isfinite(values) & (np.abs(values) < fill_threshold)
+        valid = valid_thickness & valid_values
+
+        for i in range(values.shape[0]):
+            valid_indices = np.where(valid[i])[0]
+            if len(valid_indices) == 0:
+                reduced[i, :] = np.nan
+            elif len(valid_indices) == 1:
+                reduced[i, :] = values[i, valid_indices[0]]
+            else:
+                source_depths = depths[i, valid_indices]
+                source_values = values[i, valid_indices]
+                target_depths = np.linspace(
+                    source_depths[0],
+                    source_depths[-1],
+                    target_levels,
+                    dtype=np.float32,
+                )
+                reduced[i, :] = np.interp(
+                    target_depths, source_depths, source_values
+                ).astype(np.float32)
+
+        return reduced
+
     def filter_data(self, data: Dict[str, np.ndarray], max_patterns: int = 400000) -> Tuple[np.ndarray, ...]:
         # Simple QC: exclude any profile with NaN or fill values
-        valid_profiles_qc = self._check_for_invalid_values(data)
+        if self._uses_salinity_profile_emulator():
+            valid_profiles_qc = self._check_salinity_profile_valid_values(data)
+        else:
+            valid_profiles_qc = self._check_for_invalid_values(data)
 
         # Apply thickness mask (basic validity check on surface thickness)
         mask = data['mask'] == 1
@@ -438,6 +524,23 @@ class IceDataPreparer:
         indices = np.where(valid)[0][:max_patterns]
         n = len(indices)
         print(f"Selected {n} points from {len(data['lat'])} total")
+
+        if self._uses_salinity_profile_emulator():
+            thickness = data['h'][indices, :]
+            patterns = self._interp_profiles_to_target_grid(
+                data['Temp'][indices, :], thickness
+            )
+            targets = self._interp_profiles_to_target_grid(
+                data['Salt'][indices, :], thickness
+            )
+            self.input_size = patterns.shape[1]
+            self.output_size = targets.shape[1]
+            lons = data['lon'][indices]
+            lats = data['lat'][indices]
+            if np.any(np.isnan(patterns)) or np.any(np.isnan(targets)):
+                raise ValueError("Reduced-grid salinity training data contains NaN values")
+            print(f"  Training data validation: OK (no NaN values)")
+            return patterns, targets, lons, lats
 
         # Calculate total input/output size dynamically based on 3D variables
         total_input_size = 0
@@ -655,6 +758,8 @@ class IceDataPreparer:
                 'output_features': self.output_variables,
                 'input_size': self.input_size,
                 'output_size': self.output_size,
+                'emulator_type': self.emulator_type,
+                'target_num_levels': self.target_num_levels,
                 'input_cf_mapping': input_cf_mapping,
                 'output_cf_mapping': output_cf_mapping
             }
@@ -690,7 +795,7 @@ def create_training_data_from_netcdf(netcdf_file: str,
     ocn = data_config.get('ocean_file')
     max_patterns = data_config.get('max_patterns', max_patterns)
     thin_fraction = data_config.get('thin_fraction', 1.0)
-    preparer = IceDataPreparer(config)
+    preparer = UFSEmulatorDataBuilder(config)
     preparer.prepare_training_data(atm, ocn, max_patterns, output_file, thin_fraction)
     return output_file
 
@@ -705,4 +810,4 @@ if __name__ == "__main__":
     p.add_argument('--max', type=int, default=400000)
     a = p.parse_args()
     cfg = {'domain': {}, 'data': {}}
-    IceDataPreparer(cfg).prepare_training_data(a.atm, a.ocn, a.max, a.out)
+    UFSEmulatorDataBuilder(cfg).prepare_training_data(a.atm, a.ocn, a.max, a.out)

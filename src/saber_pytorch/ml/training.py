@@ -11,7 +11,7 @@ Adapted from aibalance/ufsemulator/training.py with the following changes:
   FFNN.forward() (which operates in normalized space) is used correctly.
 
 Quick-start:
-    python scripts/train_ml_balance.py --config configs/aice.yaml
+    python scripts/train_ml_balance.py --config emulators/aice/config.yaml
 
 Distributed (SLURM):
     sbatch hpc/train_distributed.sh
@@ -98,7 +98,7 @@ class ExponentialMovingAverage:
 # ---------------------------------------------------------------------------
 
 class MLBalanceTrainer:
-    """Training wrapper for FFNN-based ML balance surface emulators.
+    """Training wrapper for FFNN-based ML balance emulators.
 
     Supports single-node (rank=0, world_size=1) and distributed DDP runs.
     """
@@ -149,6 +149,9 @@ class MLBalanceTrainer:
             hidden_size=model_cfg["hidden_size"],
             hidden_layers=model_cfg.get("hidden_layers", 2),
             activation=model_cfg.get("activation", "gelu"),
+            use_conv1d=model_cfg.get("use_conv1d", False),
+            conv_channels=model_cfg.get("conv_channels", 32),
+            conv_kernel_size=model_cfg.get("conv_kernel_size", 3),
         ).to(self.device)
         base_model.init_weights()
 
@@ -233,8 +236,15 @@ class MLBalanceTrainer:
             input_vars = input_vars[:max_feats]
         output_vars: List[str] = vcfg.get("output_variables", ["aice"])
 
-        input_size = len(input_vars)
-        output_size = len(output_vars)
+        if model_cfg.get("emulator_type") == "salinity_profile":
+            target_levels = vcfg.get("target_num_levels")
+            if target_levels is None:
+                raise ValueError("salinity_profile requires variables.target_num_levels")
+            input_size = int(target_levels)
+            output_size = int(target_levels)
+        else:
+            input_size = len(input_vars)
+            output_size = len(output_vars)
         if self.rank == 0:
             print(f"Model: {input_size} inputs → {output_size} outputs")
             print(f"  Inputs : {input_vars}")
@@ -989,9 +999,15 @@ def main() -> None:
         trainer.plot_training_history(sample_predictions=preds,
                                       sample_targets=tgts)
         out_dir = config["output"]["model_dir"]
+        if config.get("variables", {}).get("num_levels"):
+            builder = "build_vertical_ml_balance_emulator.py"
+            output = "vertical_ml_balance.ts"
+        else:
+            builder = "build_surface_ml_balance_emulator.py"
+            output = "surface_ml_balance.ts"
         print(
             f"\nNext step: build the TorchScript emulator:\n"
-            f"  python scripts/build_ml_balance_emulator.py \\\n"
+            f"  python scripts/{builder} \\\n"
             f"      --checkpoint {out_dir}/best_model.pt \\\n"
-            f"      --output ml_balance.ts"
+            f"      --output {output}"
         )
