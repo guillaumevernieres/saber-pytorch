@@ -343,6 +343,8 @@ class FFNNSalinityProfileEmulator(nn.Module):
     target_num_levels: int
     fill_value_threshold: float
     min_layer_thickness: float
+    use_temperature_gradient_grid: bool
+    temperature_gradient_weight: float
 
     def __init__(
         self,
@@ -357,6 +359,8 @@ class FFNNSalinityProfileEmulator(nn.Module):
         use_conv1d: bool = False,
         conv_channels: int = 32,
         conv_kernel_size: int = 5,
+        reduced_grid_method: str = "uniform_depth",
+        temperature_gradient_weight: float = 0.0,
     ) -> None:
         super().__init__()
 
@@ -371,9 +375,15 @@ class FFNNSalinityProfileEmulator(nn.Module):
         self.target_num_levels = int(target_num_levels)
         self.fill_value_threshold = 9000.0
         self.min_layer_thickness = 0.1
+        method = reduced_grid_method.lower()
+        self.use_temperature_gradient_grid = method in (
+            "temperature_gradient",
+            "temp_gradient",
+        )
+        self.temperature_gradient_weight = float(temperature_gradient_weight)
 
         self.ffnn = FFNN(
-            input_size=self.target_num_levels,
+            input_size=2 * self.target_num_levels,
             output_size=self.target_num_levels,
             hidden_size=hidden_size,
             hidden_layers=hidden_layers,
@@ -417,6 +427,123 @@ class FFNNSalinityProfileEmulator(nn.Module):
         )
         return torch.cumsum(safe_thickness, dim=1) - 0.5 * safe_thickness
 
+    def _uniform_target_depth(
+        self,
+        target_level: int,
+        first_depth: torch.Tensor,
+        last_depth: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.target_num_levels == 1:
+            return first_depth
+        fraction = float(target_level) / float(self.target_num_levels - 1)
+        return first_depth + fraction * (last_depth - first_depth)
+
+    def _temperature_gradient_target_depth(
+        self,
+        target_level: int,
+        first: int,
+        last: int,
+        temperature: torch.Tensor,
+        depths: torch.Tensor,
+        valid: torch.Tensor,
+    ) -> torch.Tensor:
+        first_depth = depths[first]
+        last_depth = depths[last]
+        if self.target_num_levels == 1:
+            return first_depth
+
+        fraction = float(target_level) / float(self.target_num_levels - 1)
+        max_slope = first_depth * 0.0
+        prev = -1
+        for level in range(first, self.source_num_levels):
+            if bool(valid[level]):
+                if prev >= 0:
+                    dz = depths[level] - depths[prev]
+                    if bool(dz > 1.0e-12):
+                        slope = torch.abs((temperature[level] - temperature[prev]) / dz)
+                        if bool(slope > max_slope):
+                            max_slope = slope
+                prev = level
+
+        if bool(max_slope <= 1.0e-12):
+            return self._uniform_target_depth(target_level, first_depth, last_depth)
+
+        metric_total = first_depth * 0.0
+        prev = -1
+        for level in range(first, self.source_num_levels):
+            if bool(valid[level]):
+                if prev >= 0:
+                    dz = depths[level] - depths[prev]
+                    if bool(dz > 1.0e-12):
+                        slope = torch.abs((temperature[level] - temperature[prev]) / dz)
+                        metric_total = metric_total + dz * (
+                            1.0 + self.temperature_gradient_weight * slope / max_slope
+                        )
+                prev = level
+
+        if bool(metric_total <= 1.0e-12):
+            return self._uniform_target_depth(target_level, first_depth, last_depth)
+
+        target_metric = metric_total * fraction
+        metric = first_depth * 0.0
+        prev = -1
+        for level in range(first, self.source_num_levels):
+            if bool(valid[level]):
+                if prev >= 0:
+                    dz = depths[level] - depths[prev]
+                    if bool(dz > 1.0e-12):
+                        slope = torch.abs((temperature[level] - temperature[prev]) / dz)
+                        step = dz * (
+                            1.0 + self.temperature_gradient_weight * slope / max_slope
+                        )
+                        next_metric = metric + step
+                        if bool(next_metric >= target_metric):
+                            weight = (target_metric - metric) / step
+                            return depths[prev] * (1.0 - weight) + depths[level] * weight
+                        metric = next_metric
+                prev = level
+
+        return last_depth
+
+    def _reduced_thickness_from_depths(
+        self,
+        target_depths: torch.Tensor,
+    ) -> torch.Tensor:
+        reduced_thickness = target_depths.new_zeros((self.target_num_levels,))
+        if self.target_num_levels == 1:
+            dz = 2.0 * target_depths[0]
+            if bool(dz <= self.min_layer_thickness):
+                dz = target_depths.new_tensor(self.min_layer_thickness)
+            reduced_thickness[0] = dz
+            return reduced_thickness
+
+        interfaces = target_depths.new_zeros((self.target_num_levels + 1,))
+        top_spacing = target_depths[1] - target_depths[0]
+        top = target_depths[0] - 0.5 * top_spacing
+        if bool(top < 0.0):
+            top = target_depths.new_tensor(0.0)
+        interfaces[0] = top
+
+        for level in range(1, self.target_num_levels):
+            interfaces[level] = 0.5 * (
+                target_depths[level - 1] + target_depths[level]
+            )
+
+        bottom_spacing = target_depths[self.target_num_levels - 1] - target_depths[
+            self.target_num_levels - 2
+        ]
+        interfaces[self.target_num_levels] = (
+            target_depths[self.target_num_levels - 1] + 0.5 * bottom_spacing
+        )
+
+        for level in range(self.target_num_levels):
+            dz = interfaces[level + 1] - interfaces[level]
+            if bool(dz <= self.min_layer_thickness):
+                dz = target_depths.new_tensor(self.min_layer_thickness)
+            reduced_thickness[level] = dz
+
+        return reduced_thickness
+
     @torch.jit.export
     def reduced_temperature_inputs(self, inputs: torch.Tensor) -> torch.Tensor:
         """Interpolate source-grid temperature to the configured target grid.
@@ -455,11 +582,22 @@ class FFNNSalinityProfileEmulator(nn.Module):
             last_depth = depths[node, last]
 
             for target_level in range(self.target_num_levels):
-                if self.target_num_levels == 1:
-                    target_depth = first_depth
+                if (
+                    self.use_temperature_gradient_grid
+                    and self.temperature_gradient_weight > 0.0
+                ):
+                    target_depth = self._temperature_gradient_target_depth(
+                        target_level,
+                        first,
+                        last,
+                        temperature[node],
+                        depths[node],
+                        valid[node],
+                    )
                 else:
-                    fraction = float(target_level) / float(self.target_num_levels - 1)
-                    target_depth = first_depth + fraction * (last_depth - first_depth)
+                    target_depth = self._uniform_target_depth(
+                        target_level, first_depth, last_depth
+                    )
 
                 lower = first
                 upper = last
@@ -487,10 +625,74 @@ class FFNNSalinityProfileEmulator(nn.Module):
 
         return reduced
 
+    @torch.jit.export
+    def reduced_thickness_inputs(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Reduced-grid layer thickness used as learned FFNN geometry input."""
+        temperature = self._temperature_block(inputs)
+        thickness = self._thickness_block(inputs)
+        depths = self._source_mid_depths(thickness)
+        valid = (
+            self._valid_thickness_mask(thickness)
+            & self._valid_temperature_mask(temperature)
+        )
+
+        nnodes = temperature.shape[0]
+        reduced = temperature.new_zeros((nnodes, self.target_num_levels))
+
+        for node in range(nnodes):
+            first = -1
+            last = -1
+            for level in range(self.source_num_levels):
+                if bool(valid[node, level]):
+                    if first < 0:
+                        first = level
+                    last = level
+
+            if first < 0:
+                continue
+
+            if first == last:
+                for target_level in range(self.target_num_levels):
+                    reduced[node, target_level] = thickness[node, first]
+                continue
+
+            first_depth = depths[node, first]
+            last_depth = depths[node, last]
+            target_depths = temperature.new_zeros((self.target_num_levels,))
+
+            for target_level in range(self.target_num_levels):
+                if (
+                    self.use_temperature_gradient_grid
+                    and self.temperature_gradient_weight > 0.0
+                ):
+                    target_depths[target_level] = self._temperature_gradient_target_depth(
+                        target_level,
+                        first,
+                        last,
+                        temperature[node],
+                        depths[node],
+                        valid[node],
+                    )
+                else:
+                    target_depths[target_level] = self._uniform_target_depth(
+                        target_level, first_depth, last_depth
+                    )
+
+            reduced[node, :] = self._reduced_thickness_from_depths(target_depths)
+
+        return reduced
+
+    @torch.jit.export
+    def reduced_profile_inputs(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Reduced FFNN input: [temperature(target levels), thickness(target levels)]."""
+        return torch.cat(
+            (self.reduced_temperature_inputs(inputs), self.reduced_thickness_inputs(inputs)),
+            dim=1,
+        )
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Predict reduced-grid salinity from source-grid temperature and thickness."""
-        reduced_temperature = self.reduced_temperature_inputs(inputs)
-        return self.ffnn.predict(reduced_temperature)
+        return self.ffnn.predict(self.reduced_profile_inputs(inputs))
 
     def _jac_physical(self, inputs: torch.Tensor) -> torch.Tensor:
         rows: List[torch.Tensor] = []

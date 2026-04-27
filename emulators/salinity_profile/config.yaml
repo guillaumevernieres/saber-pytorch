@@ -27,16 +27,25 @@ model:
   activation: gelu
   use_conv1d: true
   conv_channels: 32
-  conv_kernel_size: 5        # spans ±2 levels, captures local vertical structure
+  conv_kernel_size: 5
 
 variables:
   input_variables:
-    - Temp     # MOM6/UFS ocean potential temperature profile (3D)
-    - h        # MOM6 layer thickness used as the source vertical coordinate (3D)
+    - sea_water_potential_temperature
+    - sea_water_cell_thickness
   output_variables:
-    - Salt     # MOM6/UFS ocean salinity profile on the reduced grid
-  num_levels: 50             # source vertical levels passed by TorchBalance
-  target_num_levels: 30      # reduced levels used by the FFNN and salinity output
+    - sea_water_salinity
+  num_levels: 75
+  target_num_levels: 50
+  reduced_grid:
+    # uniform_depth preserves the original evenly spaced depth reduction.
+    # temperature_gradient clusters reduced levels near large |dT/dz| features.
+    # gradient_weight controls how strongly temperature gradients stretch the
+    # sampling metric: 0.0 behaves like uniform_depth; 1-3 is mild; 5-10 is
+    # visibly adaptive; larger values concentrate more levels near the
+    # strongest thermocline-like features in each column.
+    method: temperature_gradient
+    gradient_weight: 10.0
 
 domain:
   mask_mode: ocean           # train on all valid ocean points
@@ -58,7 +67,13 @@ training:
     weight_decay: 0.0001
   scheduler: null
   loss_function: mse
+  regularization:
+    vertical_smoothness:
+      enabled: true
+      weight: 1.0
+      order: 2
   early_stopping_patience: 100
+  convergence_threshold: 1e-9
   save_interval: 50
   track_jacobian: false
   use_log_scale_loss: false

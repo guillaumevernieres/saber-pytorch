@@ -36,6 +36,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from .data import create_training_data_from_netcdf
 from .ffnn import FFNN
+from .losses import build_loss_terms
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +164,7 @@ class MLBalanceTrainer:
 
         self.optimizer = self._create_optimizer()
         self.criterion = self._create_loss_function()
+        self.loss_terms = build_loss_terms(config)
         self.scheduler = self._create_scheduler()
 
         self.ema: Optional[ExponentialMovingAverage] = None
@@ -240,7 +242,7 @@ class MLBalanceTrainer:
             target_levels = vcfg.get("target_num_levels")
             if target_levels is None:
                 raise ValueError("salinity_profile requires variables.target_num_levels")
-            input_size = int(target_levels)
+            input_size = len(input_vars) * int(target_levels)
             output_size = int(target_levels)
         else:
             input_size = len(input_vars)
@@ -306,6 +308,13 @@ class MLBalanceTrainer:
         if isinstance(self.model, DDP):
             return self.model.module  # type: ignore[return-value]
         return self.model  # type: ignore[return-value]
+
+    def _compute_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        loss = self.criterion(predictions, targets)
+        bare_model = self._bare_model()
+        for term in self.loss_terms:
+            loss = loss + term(predictions, targets, bare_model)
+        return loss
 
     # ------------------------------------------------------------------
     # Data loading
@@ -413,7 +422,7 @@ class MLBalanceTrainer:
             out = self.model(x)
             if out.dim() > y.dim():
                 out = out.squeeze()
-            loss = self.criterion(out, y)
+            loss = self._compute_loss(out, y)
             loss.backward()
             self.optimizer.step()
             if self.ema is not None:
@@ -435,7 +444,7 @@ class MLBalanceTrainer:
                     out = self.model(x)
                     if out.dim() > y.dim():
                         out = out.squeeze()
-                    total += self.criterion(out, y).item()
+                    total += self._compute_loss(out, y).item()
                     n += 1
         finally:
             if self.ema is not None:

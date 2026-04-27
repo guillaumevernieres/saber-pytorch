@@ -376,6 +376,44 @@ def test_salinity_profile_ignores_thin_layer_temperature_fill_values():
     assert torch.allclose(reduced_with_fill, reduced_without_fill, atol=1e-5)
 
 
+def test_salinity_profile_can_use_temperature_gradient_reduced_grid():
+    uniform = FFNNSalinityProfileEmulator(
+        temperature_variable_name="sea_water_potential_temperature",
+        thickness_variable_name="h",
+        output_variable_name="sea_water_salinity",
+        source_num_levels=4,
+        target_num_levels=5,
+        hidden_size=4,
+        hidden_layers=1,
+        activation="relu",
+    )
+    adaptive = FFNNSalinityProfileEmulator(
+        temperature_variable_name="sea_water_potential_temperature",
+        thickness_variable_name="h",
+        output_variable_name="sea_water_salinity",
+        source_num_levels=4,
+        target_num_levels=5,
+        hidden_size=4,
+        hidden_layers=1,
+        activation="relu",
+        reduced_grid_method="temperature_gradient",
+        temperature_gradient_weight=4.0,
+    )
+    temp = torch.tensor([[0.0, 0.0, 100.0, 100.0]])
+    thickness = torch.ones_like(temp)
+    inputs = torch.cat([temp, thickness], dim=1)
+
+    uniform_reduced = uniform.reduced_temperature_inputs(inputs)
+    adaptive_reduced = adaptive.reduced_temperature_inputs(inputs)
+    adaptive_features = adaptive.reduced_profile_inputs(inputs)
+
+    assert adaptive_reduced[0, 1] > uniform_reduced[0, 1]
+    assert adaptive_reduced[0, -2] < uniform_reduced[0, -2]
+    assert torch.allclose(adaptive_reduced[:, [0, -1]], temp[:, [0, -1]])
+    assert adaptive_features.shape == (1, 10)
+    assert torch.isfinite(adaptive_features).all()
+
+
 def test_salinity_profile_output_and_jacobian_contract_shapes():
     em = FFNNSalinityProfileEmulator(
         temperature_variable_name="sea_water_potential_temperature",

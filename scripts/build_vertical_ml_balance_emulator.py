@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from saber_pytorch.ml.cf_mappings import CF_ATM, CF_OCN
 from saber_pytorch.ml.ml_balance import FFNNSalinityProfileEmulator, FFNNVerticalEmulator
 
 
@@ -41,6 +42,7 @@ def _resolve_names(
     short_names: List[str],
     cli_mapping: Dict[str, str],
     checkpoint_mapping: Dict[str, str],
+    default_mapping: Dict[str, str],
     label: str,
 ) -> List[str]:
     resolved: List[str] = []
@@ -48,7 +50,13 @@ def _resolve_names(
         if name in cli_mapping:
             resolved.append(cli_mapping[name])
         elif name in checkpoint_mapping:
-            resolved.append(checkpoint_mapping[name])
+            mapping = checkpoint_mapping[name]
+            if isinstance(mapping, dict):
+                resolved.append(str(mapping["cf_name"]))
+            else:
+                resolved.append(str(mapping))
+        elif name in default_mapping:
+            resolved.append(default_mapping[name])
         else:
             print(
                 f"Warning: no CF mapping for {label} variable '{name}'. "
@@ -129,10 +137,18 @@ def build_and_save(
     cli_out = _parse_kv_mapping(output_cf_raw)
     ckpt_meta = config.get("metadata", {})
     input_names = _resolve_names(
-        short_inputs, cli_in, dict(ckpt_meta.get("input_cf_mapping", {})), "input"
+        short_inputs,
+        cli_in,
+        dict(ckpt_meta.get("input_cf_mapping", {})),
+        {**CF_ATM, **CF_OCN},
+        "input",
     )
     output_names = _resolve_names(
-        short_outputs, cli_out, dict(ckpt_meta.get("output_cf_mapping", {})), "output"
+        short_outputs,
+        cli_out,
+        dict(ckpt_meta.get("output_cf_mapping", {})),
+        {**CF_ATM, **CF_OCN},
+        "output",
     )
 
     if emulator_type == "salinity_profile":
@@ -145,12 +161,27 @@ def build_and_save(
             raise ValueError("salinity_profile emulator requires variables.num_levels")
         source_num_levels = int(raw_num_levels)
         target_num_levels = int(var_cfg.get("target_num_levels", output_size))
-        if input_size != target_num_levels or output_size != target_num_levels:
+        expected_input_size = len(input_names) * target_num_levels
+        if input_size != expected_input_size or output_size != target_num_levels:
             raise ValueError(
                 "salinity_profile checkpoint normalization must be on the reduced grid; "
                 f"got input_size={input_size}, output_size={output_size}, "
+                f"expected_input_size={expected_input_size}, "
                 f"target_num_levels={target_num_levels}"
             )
+        reduced_grid_cfg = var_cfg.get(
+            "reduced_grid",
+            config.get("reduced_grid", config.get("data", {}).get("reduced_grid", {})),
+        )
+        reduced_grid_method = str(reduced_grid_cfg.get("method", "uniform_depth"))
+        default_gradient_weight = (
+            2.0
+            if reduced_grid_method.lower() in ("temperature_gradient", "temp_gradient")
+            else 0.0
+        )
+        temperature_gradient_weight = float(
+            reduced_grid_cfg.get("gradient_weight", default_gradient_weight)
+        )
         emulator = FFNNSalinityProfileEmulator(
             temperature_variable_name=input_names[0],
             thickness_variable_name=input_names[1],
@@ -163,6 +194,8 @@ def build_and_save(
             use_conv1d=bool(model_cfg.get("use_conv1d", False)),
             conv_channels=int(model_cfg.get("conv_channels", 32)),
             conv_kernel_size=int(model_cfg.get("conv_kernel_size", 3)),
+            reduced_grid_method=reduced_grid_method,
+            temperature_gradient_weight=temperature_gradient_weight,
         )
         runtime_input_size = len(input_names) * source_num_levels
         num_levels = source_num_levels
@@ -234,6 +267,11 @@ def build_and_save(
     print(f"  num_levels: {num_levels}")
     if emulator_type == "salinity_profile":
         print(f"  target_num_levels: {output_size}")
+        print(
+            "  reduced_grid: "
+            f"{reduced_grid_method} "
+            f"(gradient_weight={temperature_gradient_weight:g})"
+        )
     print(f"  jac_physical shape at runtime: [nnodes, nRequestedPairs]")
 
 

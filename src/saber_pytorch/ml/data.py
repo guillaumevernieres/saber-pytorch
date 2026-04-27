@@ -24,6 +24,28 @@ class UFSEmulatorDataBuilder:
         self.emulator_type = mcfg.get('emulator_type', 'vertical')
         self.target_num_levels = vcfg.get('target_num_levels')
         self.min_layer_thickness = 0.1
+        rgcfg = vcfg.get(
+            'reduced_grid',
+            config.get('reduced_grid', config.get('data', {}).get('reduced_grid', {}))
+        )
+        self.reduced_grid_method = str(
+            rgcfg.get('method', 'uniform_depth')
+        ).lower()
+        if self.reduced_grid_method == 'uniform':
+            self.reduced_grid_method = 'uniform_depth'
+        if self.reduced_grid_method in ('temperature_gradient', 'temp_gradient'):
+            self.reduced_grid_method = 'temperature_gradient'
+        if self.reduced_grid_method not in ('uniform_depth', 'temperature_gradient'):
+            raise ValueError(
+                "reduced_grid.method must be 'uniform_depth' or "
+                f"'temperature_gradient', got {self.reduced_grid_method!r}"
+            )
+        default_gradient_weight = (
+            2.0 if self.reduced_grid_method == 'temperature_gradient' else 0.0
+        )
+        self.reduced_grid_gradient_weight = float(
+            rgcfg.get('gradient_weight', default_gradient_weight)
+        )
         self.min_ice = dcfg.get('min_ice_concentration', 0.0)
         self.use_synthetic = dcfg.get('use_synthetic_data', False)
         self.mask_mode = dcfg.get('mask_mode', 'sea_ice')
@@ -153,16 +175,23 @@ class UFSEmulatorDataBuilder:
         # Track if we have 3D data to get spatial dimensions
         nlat, nlon, nlevs = None, None, None
 
-        # Check if 'h' (thickness) is needed - we'll need to read it to compute depth
-        needs_h_for_depth = 'h' in ocn_vars_needed
         h_data_3d = None  # Store h data if we need to compute depth
+        temperature_vars = {
+            'Temp', 'temp', 'sst', 'thetao', 'sea_water_potential_temperature'
+        }
+        salinity_vars = {
+            'Salt', 'salt', 'sss', 'so', 'sea_water_salinity'
+        }
+        thickness_vars = {
+            'h', 'ho', 'thick', 'thkcello', 'sea_water_cell_thickness'
+        }
 
         for var in ocn_vars_needed:
             cf_name = self.cf_ocn[var]
             var_data = None
 
             # Special handling for common MOM6 variables - try multiple possible names
-            if var == 'h':
+            if var in thickness_vars:
                 possible_names = ['h', 'ho', 'sea_water_cell_thickness', 'thkcello', 'dz']
 
                 # Debug: Print all available variables
@@ -213,14 +242,14 @@ class UFSEmulatorDataBuilder:
                         var_data = None  # Signal to handle as 1D coordinate
                         # Store computed thickness for later use
                         data['_computed_thickness'] = thickness
-                        data['h_is_coord'] = True
+                        data[f'{var}_is_coord'] = True
                         nlat = None  # Will be set when reading other 3D variables
                         nlon = None
                         nlevs = len(thickness)
                     else:
                         available_vars = all_vars
                         raise ValueError(f"Thickness variable not found and cannot compute from depth. Tried: {possible_names}. Available depth coords tried: {depth_coord_names}. All variables: {available_vars}")
-            elif var == 'Temp':
+            elif var in temperature_vars:
                 possible_names = ['Temp', 'temp', 'sea_water_potential_temperature', 'thetao', 'temperature']
                 for name in possible_names:
                     if name in do.variables:
@@ -231,7 +260,7 @@ class UFSEmulatorDataBuilder:
                 if var_data is None:
                     available_vars = list(do.variables.keys())
                     raise ValueError(f"Temperature variable not found. Tried: {possible_names}. Available variables: {available_vars[:20]}...")
-            elif var == 'Salt':
+            elif var in salinity_vars:
                 possible_names = ['Salt', 'so', 'sea_water_salinity', 'salt', 'salinity']
                 for name in possible_names:
                     if name in do.variables:
@@ -248,7 +277,7 @@ class UFSEmulatorDataBuilder:
                 raise ValueError(f"Required ocean variable '{var}' (CF name: '{cf_name}') not found in {ocn_file}")
 
             # Special handling for computed thickness (when var_data is None but we computed it)
-            if var_data is None and var == 'h' and '_computed_thickness' in data:
+            if var_data is None and var in thickness_vars and '_computed_thickness' in data:
                 # Thickness was computed from depth coordinate - treat as 1D coordinate
                 # Will be broadcast to all spatial points during filtering
                 continue  # Skip to next variable, already stored in data
@@ -284,7 +313,7 @@ class UFSEmulatorDataBuilder:
                     nlevs = min(nlevs, VERTICAL_LEVEL_LIMIT)
 
                     # Special handling for 'h' (thickness)
-                    if var == 'h':
+                    if var in thickness_vars:
                         # Check for invalid values (fill values now converted to NaN)
                         n_nan = np.sum(np.isnan(full_data))
                         n_total = full_data.size
@@ -415,15 +444,18 @@ class UFSEmulatorDataBuilder:
         fill_threshold = 9000.0
         n_spatial = len(data['lat'])
         valid_profiles = np.ones(n_spatial, dtype=bool)
+        temperature_var = self.input_variables[0]
+        thickness_var = self.input_variables[1]
+        salinity_var = self.output_variables[0]
 
-        thickness = data['h']
+        thickness = data[thickness_var]
         valid_thickness = (
             np.isfinite(thickness)
             & (thickness > self.min_layer_thickness)
         )
         valid_profiles &= np.any(valid_thickness, axis=1)
 
-        for var in ('Temp', 'Salt'):
+        for var in (temperature_var, salinity_var):
             values = data[var]
             valid_values = np.isfinite(values) & (np.abs(values) < fill_threshold)
             valid_profiles &= ~np.any(valid_thickness & ~valid_values, axis=1)
@@ -436,12 +468,150 @@ class UFSEmulatorDataBuilder:
         )
         return valid_profiles
 
-    def _interp_profiles_to_target_grid(
+    def _target_depths_for_profile(
+        self,
+        source_depths: np.ndarray,
+        temperature_values: np.ndarray,
+        target_levels: int,
+    ) -> np.ndarray:
+        if len(source_depths) == 0:
+            return np.full(target_levels, np.nan, dtype=np.float32)
+        if len(source_depths) == 1:
+            return np.full(target_levels, source_depths[0], dtype=np.float32)
+
+        if (
+            self.reduced_grid_method != 'temperature_gradient'
+            or self.reduced_grid_gradient_weight <= 0.0
+        ):
+            return np.linspace(
+                source_depths[0],
+                source_depths[-1],
+                target_levels,
+                dtype=np.float32,
+            )
+
+        dz = np.diff(source_depths)
+        valid_dz = dz > 1.0e-12
+        if not np.any(valid_dz):
+            return np.linspace(
+                source_depths[0],
+                source_depths[-1],
+                target_levels,
+                dtype=np.float32,
+            )
+
+        slopes = np.zeros_like(dz, dtype=np.float32)
+        slopes[valid_dz] = (
+            np.abs(np.diff(temperature_values)[valid_dz])
+            / dz[valid_dz]
+        )
+        max_slope = float(np.max(slopes))
+        if not np.isfinite(max_slope) or max_slope <= 1.0e-12:
+            return np.linspace(
+                source_depths[0],
+                source_depths[-1],
+                target_levels,
+                dtype=np.float32,
+            )
+
+        metric_steps = dz * (
+            1.0 + self.reduced_grid_gradient_weight * slopes / max_slope
+        )
+        metric_steps = np.where(valid_dz, metric_steps, 0.0).astype(np.float32)
+        cumulative_metric = np.concatenate(
+            (
+                np.array([0.0], dtype=np.float32),
+                np.cumsum(metric_steps, dtype=np.float32),
+            )
+        )
+        total_metric = float(cumulative_metric[-1])
+        if not np.isfinite(total_metric) or total_metric <= 1.0e-12:
+            return np.linspace(
+                source_depths[0],
+                source_depths[-1],
+                target_levels,
+                dtype=np.float32,
+            )
+
+        target_metric = np.linspace(
+            0.0,
+            total_metric,
+            target_levels,
+            dtype=np.float32,
+        )
+        return np.interp(
+            target_metric,
+            cumulative_metric,
+            source_depths,
+        ).astype(np.float32)
+
+    def _target_depths_from_temperature(
+        self,
+        temperature: np.ndarray,
+        thickness: np.ndarray,
+    ) -> np.ndarray:
+        if self.target_num_levels is None:
+            raise ValueError("target_num_levels is required for salinity_profile")
+
+        fill_threshold = 9000.0
+        target_levels = int(self.target_num_levels)
+        target_depths = np.zeros((temperature.shape[0], target_levels), dtype=np.float32)
+
+        valid_thickness = (
+            np.isfinite(thickness)
+            & (thickness > self.min_layer_thickness)
+        )
+        safe_thickness = np.where(valid_thickness, thickness, 0.0).astype(np.float32)
+        depths = np.cumsum(safe_thickness, axis=1) - 0.5 * safe_thickness
+        valid_temperature = (
+            np.isfinite(temperature)
+            & (np.abs(temperature) < fill_threshold)
+        )
+        valid = valid_thickness & valid_temperature
+
+        for i in range(temperature.shape[0]):
+            valid_indices = np.where(valid[i])[0]
+            source_depths = depths[i, valid_indices]
+            source_temperature = temperature[i, valid_indices]
+            target_depths[i, :] = self._target_depths_for_profile(
+                source_depths,
+                source_temperature,
+                target_levels,
+            )
+
+        return target_depths
+
+    def _thickness_from_target_depths(self, target_depths: np.ndarray) -> np.ndarray:
+        reduced_thickness = np.zeros_like(target_depths, dtype=np.float32)
+        n_levels = target_depths.shape[1]
+        if n_levels == 1:
+            reduced_thickness[:, 0] = np.maximum(2.0 * target_depths[:, 0], 0.0)
+            return reduced_thickness
+
+        interfaces = np.zeros((target_depths.shape[0], n_levels + 1), dtype=np.float32)
+        top_spacing = target_depths[:, 1] - target_depths[:, 0]
+        interfaces[:, 0] = np.maximum(target_depths[:, 0] - 0.5 * top_spacing, 0.0)
+        interfaces[:, 1:n_levels] = 0.5 * (
+            target_depths[:, :-1] + target_depths[:, 1:]
+        )
+        bottom_spacing = target_depths[:, -1] - target_depths[:, -2]
+        interfaces[:, n_levels] = target_depths[:, -1] + 0.5 * bottom_spacing
+
+        reduced_thickness[:, :] = np.diff(interfaces, axis=1)
+        reduced_thickness = np.where(
+            reduced_thickness > self.min_layer_thickness,
+            reduced_thickness,
+            self.min_layer_thickness,
+        )
+        return reduced_thickness.astype(np.float32)
+
+    def _interp_profiles_at_target_depths(
         self,
         values: np.ndarray,
         thickness: np.ndarray,
+        target_depths: np.ndarray,
     ) -> np.ndarray:
-        """Interpolate profiles to the salinity emulator's reduced vertical grid."""
+        """Interpolate profiles to precomputed reduced-grid target depths."""
         if self.target_num_levels is None:
             raise ValueError("target_num_levels is required for salinity_profile")
 
@@ -467,17 +637,20 @@ class UFSEmulatorDataBuilder:
             else:
                 source_depths = depths[i, valid_indices]
                 source_values = values[i, valid_indices]
-                target_depths = np.linspace(
-                    source_depths[0],
-                    source_depths[-1],
-                    target_levels,
-                    dtype=np.float32,
-                )
                 reduced[i, :] = np.interp(
-                    target_depths, source_depths, source_values
+                    target_depths[i, :], source_depths, source_values
                 ).astype(np.float32)
 
         return reduced
+
+    def _interp_profiles_to_target_grid(
+        self,
+        values: np.ndarray,
+        thickness: np.ndarray,
+    ) -> np.ndarray:
+        """Interpolate profiles to the salinity emulator's reduced vertical grid."""
+        target_depths = self._target_depths_from_temperature(values, thickness)
+        return self._interp_profiles_at_target_depths(values, thickness, target_depths)
 
     def filter_data(self, data: Dict[str, np.ndarray], max_patterns: int = 400000) -> Tuple[np.ndarray, ...]:
         # Simple QC: exclude any profile with NaN or fill values
@@ -526,12 +699,24 @@ class UFSEmulatorDataBuilder:
         print(f"Selected {n} points from {len(data['lat'])} total")
 
         if self._uses_salinity_profile_emulator():
-            thickness = data['h'][indices, :]
-            patterns = self._interp_profiles_to_target_grid(
-                data['Temp'][indices, :], thickness
+            temperature_var = self.input_variables[0]
+            thickness_var = self.input_variables[1]
+            salinity_var = self.output_variables[0]
+            thickness = data[thickness_var][indices, :]
+            temperature = data[temperature_var][indices, :]
+            target_depths = self._target_depths_from_temperature(
+                temperature, thickness
             )
-            targets = self._interp_profiles_to_target_grid(
-                data['Salt'][indices, :], thickness
+            reduced_temperature = self._interp_profiles_at_target_depths(
+                temperature, thickness, target_depths
+            )
+            reduced_thickness = self._thickness_from_target_depths(target_depths)
+            patterns = np.concatenate(
+                (reduced_temperature, reduced_thickness),
+                axis=1,
+            ).astype(np.float32)
+            targets = self._interp_profiles_at_target_depths(
+                data[salinity_var][indices, :], thickness, target_depths
             )
             self.input_size = patterns.shape[1]
             self.output_size = targets.shape[1]
@@ -669,13 +854,15 @@ class UFSEmulatorDataBuilder:
 
         return mean, std
 
-    def thin_patterns(self, patterns, targets, lons, lats, fraction):
+    def thin_patterns(self, patterns, targets, lons, lats, fraction, target_depths=None):
         if fraction < 1.0:
             n = len(targets)
             m = int(n * fraction)
             idx = np.random.choice(n, m, replace=False)
-            return patterns[idx], targets[idx], lons[idx], lats[idx]
-        return patterns, targets, lons, lats
+            if target_depths is not None:
+                return patterns[idx], targets[idx], lons[idx], lats[idx], target_depths[idx]
+            return patterns[idx], targets[idx], lons[idx], lats[idx], None
+        return patterns, targets, lons, lats, target_depths
 
     def prepare_training_data(self, atm_file: Optional[str] = None,
                               ocn_file: Optional[str] = None,
@@ -683,8 +870,15 @@ class UFSEmulatorDataBuilder:
                               output_file: Optional[str] = None,
                               thin_fraction: float = 1.0) -> Dict:
         data = self.read_netcdf_data_pair(atm_file, ocn_file)
-        patterns, targets, lons, lats = self.filter_data(data, max_patterns)
-        patterns, targets, lons, lats = self.thin_patterns(patterns, targets, lons, lats, thin_fraction)
+        filtered = self.filter_data(data, max_patterns)
+        if len(filtered) == 5:
+            patterns, targets, lons, lats, target_depths = filtered
+        else:
+            patterns, targets, lons, lats = filtered
+            target_depths = None
+        patterns, targets, lons, lats, target_depths = self.thin_patterns(
+            patterns, targets, lons, lats, thin_fraction, target_depths
+        )
 
         if len(patterns) == 0:
             raise ValueError(
@@ -760,6 +954,10 @@ class UFSEmulatorDataBuilder:
                 'output_size': self.output_size,
                 'emulator_type': self.emulator_type,
                 'target_num_levels': self.target_num_levels,
+                'reduced_grid': {
+                    'method': self.reduced_grid_method,
+                    'gradient_weight': self.reduced_grid_gradient_weight,
+                },
                 'input_cf_mapping': input_cf_mapping,
                 'output_cf_mapping': output_cf_mapping
             }

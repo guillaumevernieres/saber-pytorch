@@ -4,7 +4,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import netCDF4 as nc
 import numpy as np
@@ -68,15 +68,105 @@ def _target_depths(
     )
 
 
-def _parse_indices(raw: str, n_samples: int, count: int) -> List[int]:
-    if raw:
-        indices = [int(x.strip()) for x in raw.split(",") if x.strip()]
-    else:
-        indices = list(range(min(count, n_samples)))
+def _depths_from_thickness(thickness_profile: np.ndarray) -> np.ndarray:
+    safe_thickness = np.where(
+        np.isfinite(thickness_profile) & (thickness_profile > 0.0),
+        thickness_profile,
+        0.0,
+    ).astype(np.float32)
+    return np.cumsum(safe_thickness) - 0.5 * safe_thickness
+
+
+def _parse_indices(raw: str, n_samples: int) -> List[int]:
+    indices = [int(x.strip()) for x in raw.split(",") if x.strip()]
     for idx in indices:
         if idx < 0 or idx >= n_samples:
             raise ValueError(f"sample index {idx} out of range [0, {n_samples})")
     return indices
+
+
+def _select_random_indices(
+    surface_temp: np.ndarray,
+    count: int,
+    min_temp: Optional[float],
+    max_temp: Optional[float],
+    seed: Optional[int],
+) -> List[int]:
+    if count < 1:
+        raise ValueError("--count must be at least 1")
+
+    candidates = np.isfinite(surface_temp)
+    if min_temp is not None:
+        candidates &= surface_temp >= min_temp
+    if max_temp is not None:
+        candidates &= surface_temp <= max_temp
+
+    candidate_indices = np.flatnonzero(candidates)
+    if len(candidate_indices) == 0:
+        bounds = []
+        if min_temp is not None:
+            bounds.append(f">= {min_temp:g}")
+        if max_temp is not None:
+            bounds.append(f"<= {max_temp:g}")
+        suffix = f" with surface temperature {' and '.join(bounds)}" if bounds else ""
+        raise ValueError(f"No profiles found{suffix}")
+
+    rng = np.random.default_rng(seed)
+    sample_count = min(count, len(candidate_indices))
+    selected = rng.choice(candidate_indices, size=sample_count, replace=False)
+    return sorted(selected.tolist())
+
+
+def _count_matching_profiles(
+    surface_temp: np.ndarray,
+    min_temp: Optional[float],
+    max_temp: Optional[float],
+) -> int:
+    candidates = np.isfinite(surface_temp)
+    if min_temp is not None:
+        candidates &= surface_temp >= min_temp
+    if max_temp is not None:
+        candidates &= surface_temp <= max_temp
+    return int(np.count_nonzero(candidates))
+
+
+def _select_indices(
+    raw: str,
+    surface_temp: np.ndarray,
+    count: int,
+    min_temp: Optional[float],
+    max_temp: Optional[float],
+    seed: Optional[int],
+) -> List[int]:
+    if raw:
+        return _parse_indices(raw, len(surface_temp))
+    return _select_random_indices(surface_temp, count, min_temp, max_temp, seed)
+
+
+def _metadata_dict(raw: np.lib.npyio.NpzFile) -> Dict:
+    if "metadata" not in raw:
+        return {}
+    metadata = raw["metadata"]
+    if hasattr(metadata, "item"):
+        return metadata.item()
+    return dict(metadata)
+
+
+def _depth_spacing_summary(depths: np.ndarray, indices: List[int]) -> str:
+    ratios: List[float] = []
+    for idx in indices:
+        spacing = np.diff(depths[idx])
+        spacing = spacing[np.isfinite(spacing) & (spacing > 0.0)]
+        if len(spacing) == 0:
+            continue
+        ratios.append(float(np.max(spacing) / np.min(spacing)))
+
+    if not ratios:
+        return "no finite positive spacing"
+    return (
+        f"min/max spacing ratio across plotted profiles: "
+        f"{min(ratios):.2f}-{max(ratios):.2f}"
+    )
 
 
 def main() -> None:
@@ -89,8 +179,33 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--indices", default="")
     parser.add_argument("--count", type=int, default=6)
+    parser.add_argument(
+        "--surface-temp-min",
+        type=float,
+        default=None,
+        help="Only randomly sample profiles with surface temperature >= this value",
+    )
+    parser.add_argument(
+        "--surface-temp-max",
+        type=float,
+        default=None,
+        help="Only randomly sample profiles with surface temperature <= this value",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible profile selection",
+    )
     parser.add_argument("--min-layer-thickness", type=float, default=0.1)
     args = parser.parse_args()
+
+    if (
+        args.surface_temp_min is not None
+        and args.surface_temp_max is not None
+        and args.surface_temp_min > args.surface_temp_max
+    ):
+        raise ValueError("--surface-temp-min cannot be greater than --surface-temp-max")
 
     try:
         import matplotlib.pyplot as plt
@@ -101,27 +216,93 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     raw = np.load(args.data, allow_pickle=True)
-    temp = raw["inputs"].astype(np.float32)
+    model_inputs = raw["inputs"].astype(np.float32)
     salt_target = raw["targets"].astype(np.float32)
+    target_levels = salt_target.shape[1]
+    if model_inputs.shape[1] >= 2 * target_levels:
+        temp = model_inputs[:, :target_levels]
+        thickness = model_inputs[:, target_levels:2 * target_levels]
+    else:
+        temp = model_inputs
+        thickness = None
     y_index = raw["lats"].astype(np.int64)
     x_index = raw["lons"].astype(np.int64)
+    metadata = _metadata_dict(raw)
+    reduced_grid = metadata.get("reduced_grid", {})
+    saved_target_depths = (
+        raw["target_depths"].astype(np.float32)
+        if "target_depths" in raw
+        else None
+    )
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    model = _build_model(checkpoint, temp.shape[1], salt_target.shape[1])
+    model = _build_model(checkpoint, model_inputs.shape[1], salt_target.shape[1])
     with torch.no_grad():
-        salt_pred = model.predict(torch.from_numpy(temp).float()).cpu().numpy()
+        salt_pred = model.predict(torch.from_numpy(model_inputs).float()).cpu().numpy()
 
     h = _read_h(args.mom_file)
-    indices = _parse_indices(args.indices, temp.shape[0], args.count)
+    surface_temp = temp[:, 0]
+    indices = _select_indices(
+        args.indices,
+        surface_temp,
+        args.count,
+        args.surface_temp_min,
+        args.surface_temp_max,
+        args.seed,
+    )
+
+    if args.indices:
+        print(f"Plotting requested profiles: {indices}")
+    else:
+        n_matching = _count_matching_profiles(
+            surface_temp,
+            args.surface_temp_min,
+            args.surface_temp_max,
+        )
+        print(
+            f"Randomly selected {len(indices)} profiles from "
+            f"{n_matching} profiles matching the surface-temperature bounds"
+        )
+
+    if thickness is not None:
+        input_depths = np.stack(
+            [_depths_from_thickness(profile) for profile in thickness],
+            axis=0,
+        )
+        method = reduced_grid.get("method", "unknown")
+        weight = reduced_grid.get("gradient_weight", "unknown")
+        print(
+            f"Using depth reconstructed from reduced sea_water_cell_thickness "
+            f"input (method={method}, gradient_weight={weight}); "
+            f"{_depth_spacing_summary(input_depths, indices)}"
+        )
+    elif saved_target_depths is None:
+        input_depths = None
+        print(
+            "Warning: training data has no reduced thickness input; plotting "
+            "uniform depths from the MOM layer thickness."
+        )
+    else:
+        input_depths = saved_target_depths
+        method = reduced_grid.get("method", "unknown")
+        weight = reduced_grid.get("gradient_weight", "unknown")
+        print(
+            f"Using saved target_depths from training data "
+            f"(method={method}, gradient_weight={weight}); "
+            f"{_depth_spacing_summary(saved_target_depths, indices)}"
+        )
 
     for idx in indices:
         y = int(y_index[idx])
         x = int(x_index[idx])
-        depth = _target_depths(
-            h[y, x, :],
-            temp.shape[1],
-            args.min_layer_thickness,
-        )
+        if input_depths is not None:
+            depth = input_depths[idx]
+        else:
+            depth = _target_depths(
+                h[y, x, :],
+                target_levels,
+                args.min_layer_thickness,
+            )
         err = salt_pred[idx] - salt_target[idx]
         rmse = float(np.sqrt(np.mean(err ** 2)))
         bias = float(np.mean(err))
@@ -148,7 +329,9 @@ def main() -> None:
         axes[2].grid(True, alpha=0.3)
 
         axes[0].invert_yaxis()
-        fig.suptitle(f"Sample {idx} (y={y}, x={x})")
+        fig.suptitle(
+            f"Sample {idx} (y={y}, x={x}, surface temp={surface_temp[idx]:.3f})"
+        )
         fig.tight_layout()
 
         out = out_dir / f"inference_sample_{idx:04d}.png"
