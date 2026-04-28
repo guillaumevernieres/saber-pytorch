@@ -513,7 +513,7 @@ class FFNNSalinityProfileEmulator(nn.Module):
         if self.target_num_levels == 1:
             dz = 2.0 * target_depths[0]
             if bool(dz <= self.min_layer_thickness):
-                dz = target_depths.new_tensor(self.min_layer_thickness)
+                dz = target_depths[0] * 0.0 + self.min_layer_thickness
             reduced_thickness[0] = dz
             return reduced_thickness
 
@@ -521,7 +521,7 @@ class FFNNSalinityProfileEmulator(nn.Module):
         top_spacing = target_depths[1] - target_depths[0]
         top = target_depths[0] - 0.5 * top_spacing
         if bool(top < 0.0):
-            top = target_depths.new_tensor(0.0)
+            top = target_depths[0] * 0.0
         interfaces[0] = top
 
         for level in range(1, self.target_num_levels):
@@ -539,7 +539,7 @@ class FFNNSalinityProfileEmulator(nn.Module):
         for level in range(self.target_num_levels):
             dz = interfaces[level + 1] - interfaces[level]
             if bool(dz <= self.min_layer_thickness):
-                dz = target_depths.new_tensor(self.min_layer_thickness)
+                dz = target_depths[0] * 0.0 + self.min_layer_thickness
             reduced_thickness[level] = dz
 
         return reduced_thickness

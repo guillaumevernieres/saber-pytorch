@@ -116,8 +116,8 @@ def _contour_map(ax, triangulation, values, title, label, cmap, vmin=None, vmax=
 
     levels = np.linspace(vmin, vmax, 31)
     cf = ax.tricontourf(triangulation, values, levels=levels, cmap=cmap, extend="both")
-    ax.set_xlabel("x index")
-    ax.set_ylabel("y index")
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
     ax.set_title(title)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.2)
@@ -228,7 +228,7 @@ def main() -> None:
         out_csv,
         table,
         delimiter=",",
-        header="x_index,y_index,profile_rmse,profile_bias",
+        header="lon,lat,profile_rmse,profile_bias",
         comments="",
     )
 

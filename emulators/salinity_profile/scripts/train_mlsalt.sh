@@ -6,8 +6,9 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
 RUN_DIR="$(pwd -P)"
 
 BASE_CONFIG="${REPO_ROOT}/emulators/salinity_profile/config.yaml"
-OCN_FILE="${OCN_FILE:-${REPO_ROOT}/../i-jedi/test-soca/geom100/MOM.res.nc}"
-DATA_FILE="${DATA_FILE:-data/salt_profile_training.npz}"
+WOA_FILE="${WOA_FILE:-/home/gvernier/data/woa/woa23_B5C2_st00_04.nc}"
+MODEL_DEPTH_FILE="${MODEL_DEPTH_FILE:-${REPO_ROOT}/../i-jedi/test-soca/geom100/MOM.res.nc}"
+DATA_FILE="${DATA_FILE:-data/salt_profile_training_woa.npz}"
 MODEL_DIR="${MODEL_DIR:-models_salt_profile}"
 OUTPUT_TS="${OUTPUT_TS:-vertical_ml_balance_salt_profile.ts}"
 RUN_CONFIG="${RUN_CONFIG:-config.local.yaml}"
@@ -46,16 +47,19 @@ with open(run_config, "w", encoding="utf-8") as handle:
     yaml.safe_dump(config, handle, sort_keys=False)
 PY
 
-echo "Repository : ${REPO_ROOT}"
-echo "Run dir    : ${RUN_DIR}"
-echo "Config     : ${RUN_CONFIG}"
-echo "Data file  : ${DATA_FILE}"
-echo "Model dir  : ${MODEL_DIR}"
-echo "TorchScript: ${OUTPUT_TS}"
+echo "Repository    : ${REPO_ROOT}"
+echo "Run dir       : ${RUN_DIR}"
+echo "Config        : ${RUN_CONFIG}"
+echo "WOA file      : ${WOA_FILE}"
+echo "Model depth   : ${MODEL_DEPTH_FILE}"
+echo "Data file     : ${DATA_FILE}"
+echo "Model dir     : ${MODEL_DIR}"
+echo "TorchScript   : ${OUTPUT_TS}"
 
-python "${REPO_ROOT}/scripts/prepare_training_data.py" \
+python "${REPO_ROOT}/scripts/prepare_woa_training_data.py" \
+  --woa-file "${WOA_FILE}" \
+  --model-depth-file "${MODEL_DEPTH_FILE}" \
   --config "${RUN_CONFIG}" \
-  --ocn "${OCN_FILE}" \
   --output "${DATA_FILE}"
 
 python "${REPO_ROOT}/scripts/train_ml_balance.py" \

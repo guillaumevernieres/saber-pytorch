@@ -1,0 +1,54 @@
+# Localized heave salinity balance demo configuration.
+#
+# Run from the repository root:
+#
+#   python emulators/heave_salinity/scripts/plot_geom100_jacobian.py \
+#       --config emulators/heave_salinity/config.yaml
+
+input:
+  ocean_file: ../i-jedi/test-soca/geom100/MOM.res.nc
+  grid_file: ../i-jedi/test-soca/geom100/mom6_structured_grid.nc
+  temperature_variable: Temp
+  salinity_variable: Salt
+  thickness_variable: h
+  longitude_variable: lon
+  latitude_variable: lat
+
+model:
+  epsilon: 1.0e-12
+  epsilon_taper: 1.0e-3
+  amplitude: 1.0
+  use_temperature_gradient_taper: true
+  min_valid_thickness_m: 0.1
+
+ml_salinity:
+  enabled: true
+  checkpoint: /home/gvernier/sandboxes/saber-pytorch/emulators/salinity_profile/scripts/
+
+argo:
+  profiles_file: emulators/heave_salinity/outputs/argo_ts_profiles.npz
+  raw_temperature_file: /home/gvernier/Documents/gomo/gomo-mom6/gdas.202604*/00/analysis/ocean/diags/insitu_temp_profile_argo.nc
+  raw_salinity_file: /home/gvernier/Documents/gomo/gomo-mom6/gdas.202604*/00/analysis/ocean/diags/insitu_salt_profile_argo.nc
+  model_depth_file: ../i-jedi/test-soca/geom100/MOM.res.nc
+  min_common_valid_levels: 10
+  background_search_radius_deg: 3.0
+  background_min_distance_deg: 1.0
+  background_min_surface_temperature_difference: 1.0
+  max_stats_depth_m: 2000.0
+  salinity_min: 20.0
+  salinity_max: 45.0
+
+diagnostics:
+  # A valid column near the central Pacific in the geom100 example.
+  target_lon: -160
+  target_lat: 30
+  background_offset_iy: 5
+  background_offset_ix: 5
+  background_search_radius: 60
+  background_min_grid_distance: 5
+  background_min_surface_temperature_difference: 3.0
+  map_levels: [5, 15, 30, 50]
+  batch_size: 4096
+
+output:
+  directory: emulators/heave_salinity/outputs

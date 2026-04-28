@@ -1,3 +1,4 @@
+from .physics.heave_salinity import WeaverTSBalance
 from .physics.steric_height import StericHeightEmulator
 from .physics.roquet_eos import RoquetEOS
 from .ml.ffnn import FFNN
@@ -8,4 +9,11 @@ from .ml.ml_balance import FFNNSurfaceEmulator, FFNNVerticalEmulator
 #   from saber_pytorch.ml.training import MLBalanceTrainer, load_config
 #   from saber_pytorch.ml.data import UFSEmulatorDataBuilder
 
-__all__ = ["StericHeightEmulator", "RoquetEOS", "FFNN", "FFNNSurfaceEmulator", "FFNNVerticalEmulator"]
+__all__ = [
+    "WeaverTSBalance",
+    "StericHeightEmulator",
+    "RoquetEOS",
+    "FFNN",
+    "FFNNSurfaceEmulator",
+    "FFNNVerticalEmulator",
+]

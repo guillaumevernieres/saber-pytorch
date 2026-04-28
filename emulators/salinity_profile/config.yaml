@@ -1,20 +1,24 @@
 # Vertical salinity emulator — Salt(z) from Temp(z)
 #
 # Predicts salinity on a reduced vertical grid from source-grid temperature.
-# TorchBalance still supplies source-grid Temp and h.  h is layer thickness;
-# source mid-layer depth is cumsum(h) - 0.5*h.  Levels with h <= 0.1 m are dropped
-# before interpolation so lower fill regions are not sampled.
+# Training data is derived from the WOA23 annual climatology rather than
+# from model background fields.  TorchBalance still supplies source-grid
+# Temp and h at runtime.  h is layer thickness; source mid-layer depth is
+# cumsum(h) - 0.5*h.  Levels with h <= 0.1 m are dropped before
+# interpolation so lower fill regions are not sampled.
 # A Conv1d front-end captures vertical structure before the MLP.
 # Domain: all valid ocean points (no ice filtering).
 #
 # Typical workflow:
-#   python scripts/prepare_training_data.py \
-#       --config emulators/salinity_profile/config.yaml \
-#       --ocn path/to/ocean.nc \
-#       --output data/salt_profile_training.npz
+#   python scripts/prepare_woa_training_data.py \
+#       --woa-file  /path/to/woa23_B5C2_st00_01.nc \
+#       --model-depth-file  /path/to/MOM.res.nc \
+#       --config    emulators/salinity_profile/config.yaml \
+#       --output    data/salt_profile_training_woa.npz
 #
-#   python scripts/train_ml_balance.py --config emulators/salinity_profile/config.yaml \
-#       --data-path data/salt_profile_training.npz
+#   python scripts/train_ml_balance.py \
+#       --config emulators/salinity_profile/config.yaml \
+#       --data-path data/salt_profile_training_woa.npz
 #
 #   python scripts/build_vertical_ml_balance_emulator.py \
 #       --checkpoint models_salt_profile/best_model.pt \
@@ -22,7 +26,7 @@
 
 model:
   emulator_type: salinity_profile
-  hidden_size: 256
+  hidden_size: 128
   hidden_layers: 4
   activation: gelu
   use_conv1d: true
@@ -52,14 +56,14 @@ domain:
   min_ice_concentration: 0.15
 
 data:
-  data_path: data/salt_profile_training.npz
+  data_path: data/salt_profile_training_woa.npz
   validation_split: 0.1
   num_workers: 0
   max_patterns: 500000
   thin_fraction: 1.0
 
 training:
-  epochs: 100000
+  epochs: 10000
   batch_size: 2048
   optimizer:
     type: adam
@@ -69,11 +73,11 @@ training:
   loss_function: mse
   regularization:
     vertical_smoothness:
-      enabled: true
-      weight: 1.0
+      enabled: false
+      weight: 0.1
       order: 2
   early_stopping_patience: 100
-  convergence_threshold: 1e-9
+  convergence_threshold: 1e-12
   save_interval: 50
   track_jacobian: false
   use_log_scale_loss: false

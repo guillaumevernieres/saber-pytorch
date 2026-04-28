@@ -175,7 +175,12 @@ def main() -> None:
     )
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--data", required=True)
-    parser.add_argument("--mom-file", required=True)
+    parser.add_argument(
+        "--mom-file",
+        default=None,
+        help="MOM restart file with h variable; only needed when the training "
+             "data does not contain thickness (old format without reduced dz).",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--indices", default="")
     parser.add_argument("--count", type=int, default=6)
@@ -225,8 +230,8 @@ def main() -> None:
     else:
         temp = model_inputs
         thickness = None
-    y_index = raw["lats"].astype(np.int64)
-    x_index = raw["lons"].astype(np.int64)
+    lats = raw["lats"].astype(np.float32)
+    lons = raw["lons"].astype(np.float32)
     metadata = _metadata_dict(raw)
     reduced_grid = metadata.get("reduced_grid", {})
     saved_target_depths = (
@@ -240,7 +245,6 @@ def main() -> None:
     with torch.no_grad():
         salt_pred = model.predict(torch.from_numpy(model_inputs).float()).cpu().numpy()
 
-    h = _read_h(args.mom_file)
     surface_temp = temp[:, 0]
     indices = _select_indices(
         args.indices,
@@ -277,12 +281,19 @@ def main() -> None:
             f"{_depth_spacing_summary(input_depths, indices)}"
         )
     elif saved_target_depths is None:
+        if args.mom_file is None:
+            raise ValueError(
+                "Training data has no thickness input and no saved "
+                "target_depths. Supply --mom-file to derive depths from h."
+            )
+        h = _read_h(args.mom_file)
         input_depths = None
         print(
             "Warning: training data has no reduced thickness input; plotting "
             "uniform depths from the MOM layer thickness."
         )
     else:
+        h = None
         input_depths = saved_target_depths
         method = reduced_grid.get("method", "unknown")
         weight = reduced_grid.get("gradient_weight", "unknown")
@@ -293,13 +304,15 @@ def main() -> None:
         )
 
     for idx in indices:
-        y = int(y_index[idx])
-        x = int(x_index[idx])
+        lat = float(lats[idx])
+        lon = float(lons[idx])
         if input_depths is not None:
             depth = input_depths[idx]
         else:
+            y = int(round(lat))
+            x = int(round(lon))
             depth = _target_depths(
-                h[y, x, :],
+                h[y, x, :],  # type: ignore[index]
                 target_levels,
                 args.min_layer_thickness,
             )
@@ -315,22 +328,30 @@ def main() -> None:
         axes[0].set_title("Input Temp")
         axes[0].grid(True, alpha=0.3)
 
-        axes[1].plot(salt_target[idx], depth, "k-o", markersize=3, label="Target")
-        axes[1].plot(salt_pred[idx], depth, "r--s", markersize=3, label="Predicted")
+        axes[1].plot(
+            salt_target[idx], depth, "k-o", markersize=3, label="Target"
+        )
+        axes[1].plot(
+            salt_pred[idx], depth, "r--s", markersize=3, label="Predicted"
+        )
         axes[1].set_xlabel("Salt")
         axes[1].set_title("Salt Target vs Output")
         axes[1].legend()
         axes[1].grid(True, alpha=0.3)
 
         axes[2].plot(err, depth, "g-o", markersize=3)
-        axes[2].axvline(0.0, color="k", linestyle="--", linewidth=1, alpha=0.5)
+        axes[2].axvline(
+            0.0, color="k", linestyle="--", linewidth=1, alpha=0.5
+        )
         axes[2].set_xlabel("Salt error")
         axes[2].set_title(f"Error\nRMSE={rmse:.4f}, bias={bias:.4f}")
         axes[2].grid(True, alpha=0.3)
 
         axes[0].invert_yaxis()
         fig.suptitle(
-            f"Sample {idx} (y={y}, x={x}, surface temp={surface_temp[idx]:.3f})"
+            f"Sample {idx} "
+            f"(lon={lon:.2f}, lat={lat:.2f}, "
+            f"surface temp={surface_temp[idx]:.3f})"
         )
         fig.tight_layout()
 
