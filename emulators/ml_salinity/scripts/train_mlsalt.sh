@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd -P)"
 RUN_DIR="$(pwd -P)"
 
-BASE_CONFIG="${REPO_ROOT}/emulators/salinity_profile/config.yaml"
+BASE_CONFIG="${REPO_ROOT}/emulators/ml_salinity/config.yaml"
 WOA_FILE="${WOA_FILE:-/home/gvernier/data/woa/woa23_B5C2_st00_04.nc}"
 MODEL_DEPTH_FILE="${MODEL_DEPTH_FILE:-${REPO_ROOT}/../i-jedi/test-soca/geom100/MOM.res.nc}"
 DATA_FILE="${DATA_FILE:-data/salt_profile_training_woa.npz}"

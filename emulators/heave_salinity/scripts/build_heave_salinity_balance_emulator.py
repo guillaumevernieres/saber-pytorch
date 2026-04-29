@@ -15,7 +15,7 @@ from typing import List
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from saber_pytorch.physics.heave_salinity import LocalizedHeaveSalinityEmulator
+from saber_pytorch.physics.heave_salinity import WeaverTSBalance
 
 
 def build_and_save(
@@ -25,22 +25,26 @@ def build_and_save(
     dz_name: str = "ocean_layer_thickness",
     output_name: str = "sea_water_salinity",
     epsilon: float = 1.0e-12,
-    epsilon_taper: float = 1.0e-10,
-    localization_length_scale_levels: float = 3.0,
+    epsilon_taper: float = 1.0e-6,
+    amplitude: float = 1.0,
     use_temperature_gradient_taper: bool = True,
-    output_taper: str = "temperature_gradient",
+    suppress_shallow_weak_stratification: bool = False,
+    shallow_taper_depth_m: float = 50.0,
+    shallow_epsilon_taper: float = 1.0e-4,
 ) -> None:
     input_names: List[str] = [T_name, S_name, dz_name]
     output_names: List[str] = [output_name]
 
-    emulator = LocalizedHeaveSalinityEmulator(
+    emulator = WeaverTSBalance(
         input_names=input_names,
         output_names=output_names,
         epsilon=epsilon,
         epsilon_taper=epsilon_taper,
-        localization_length_scale_levels=localization_length_scale_levels,
+        amplitude=amplitude,
         use_temperature_gradient_taper=use_temperature_gradient_taper,
-        output_taper=output_taper,
+        suppress_shallow_weak_stratification=suppress_shallow_weak_stratification,
+        shallow_taper_depth_m=shallow_taper_depth_m,
+        shallow_epsilon_taper=shallow_epsilon_taper,
     )
     emulator.eval()
 
@@ -82,18 +86,20 @@ def main() -> None:
     parser.add_argument("--dz-name", default="ocean_layer_thickness")
     parser.add_argument("--output-name", default="sea_water_salinity")
     parser.add_argument("--epsilon", type=float, default=1.0e-12)
-    parser.add_argument("--epsilon-taper", type=float, default=1.0e-10)
-    parser.add_argument("--localization-length-scale-levels", type=float, default=3.0)
+    parser.add_argument("--epsilon-taper", type=float, default=1.0e-6)
+    parser.add_argument("--amplitude", type=float, default=1.0)
     parser.add_argument(
         "--no-temperature-gradient-taper",
         action="store_true",
         help="Disable the temperature-gradient taper",
     )
     parser.add_argument(
-        "--output-taper",
-        choices=("temperature_gradient", "none"),
-        default="temperature_gradient",
+        "--suppress-shallow-weak-stratification",
+        action="store_true",
+        help="Use the stronger shallow taper above --shallow-taper-depth-m",
     )
+    parser.add_argument("--shallow-taper-depth-m", type=float, default=50.0)
+    parser.add_argument("--shallow-epsilon-taper", type=float, default=1.0e-4)
     args = parser.parse_args()
 
     build_and_save(
@@ -104,9 +110,13 @@ def main() -> None:
         output_name=args.output_name,
         epsilon=args.epsilon,
         epsilon_taper=args.epsilon_taper,
-        localization_length_scale_levels=args.localization_length_scale_levels,
+        amplitude=args.amplitude,
         use_temperature_gradient_taper=not args.no_temperature_gradient_taper,
-        output_taper=args.output_taper,
+        suppress_shallow_weak_stratification=(
+            args.suppress_shallow_weak_stratification
+        ),
+        shallow_taper_depth_m=args.shallow_taper_depth_m,
+        shallow_epsilon_taper=args.shallow_epsilon_taper,
     )
 
 

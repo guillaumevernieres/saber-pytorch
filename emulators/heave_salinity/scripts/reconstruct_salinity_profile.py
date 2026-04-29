@@ -212,6 +212,13 @@ def _make_emulator(config: Dict[str, Any]) -> WeaverTSBalance:
         use_temperature_gradient_taper=bool(
             model.get("use_temperature_gradient_taper", True)
         ),
+        suppress_shallow_weak_stratification=bool(
+            model.get("suppress_shallow_weak_stratification", False)
+        ),
+        shallow_taper_depth_m=float(model.get("shallow_taper_depth_m", 50.0)),
+        shallow_epsilon_taper=float(
+            model.get("shallow_epsilon_taper", 1.0e-4)
+        ),
     ).eval()
 
 

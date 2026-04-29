@@ -13,11 +13,11 @@
 #   python scripts/prepare_woa_training_data.py \
 #       --woa-file  /path/to/woa23_B5C2_st00_01.nc \
 #       --model-depth-file  /path/to/MOM.res.nc \
-#       --config    emulators/salinity_profile/config.yaml \
+#       --config    emulators/ml_salinity/config.yaml \
 #       --output    data/salt_profile_training_woa.npz
 #
 #   python scripts/train_ml_balance.py \
-#       --config emulators/salinity_profile/config.yaml \
+#       --config emulators/ml_salinity/config.yaml \
 #       --data-path data/salt_profile_training_woa.npz
 #
 #   python scripts/build_vertical_ml_balance_emulator.py \

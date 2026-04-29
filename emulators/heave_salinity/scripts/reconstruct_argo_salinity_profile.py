@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Reconstruct Argo salinity profiles with the heave balance for warm observations.
+"""Reconstruct Argo salinity profiles with the heave balance.
 
-For every retained Argo profile whose near-surface temperature exceeds a
-configurable threshold, pick a nearby background profile and apply the
-localized heave balance:
+For every retained Argo profile whose near-surface temperature is inside a
+configurable range, pick a nearby background profile and apply the localized
+heave balance:
 
     deltaT = T_truth - T_background
     S_heave = S_background + K_ST(background) * deltaT
@@ -14,7 +14,8 @@ qualifying observation.
 Example usage:
     python emulators/heave_salinity/scripts/reconstruct_argo_salinity_profile.py \\
         --config emulators/heave_salinity/config.yaml \\
-        --surface-temp-threshold 20 \\
+        --surface-temp-min 20 \\
+        --surface-temp-max 30 \\
         --max-profiles 50
 """
 
@@ -207,6 +208,13 @@ def _make_emulator(config: Dict[str, Any]) -> WeaverTSBalance:
         amplitude=float(model.get("amplitude", 1.0)),
         use_temperature_gradient_taper=bool(
             model.get("use_temperature_gradient_taper", True)
+        ),
+        suppress_shallow_weak_stratification=bool(
+            model.get("suppress_shallow_weak_stratification", False)
+        ),
+        shallow_taper_depth_m=float(model.get("shallow_taper_depth_m", 50.0)),
+        shallow_epsilon_taper=float(
+            model.get("shallow_epsilon_taper", 1.0e-4)
         ),
     ).eval()
 
@@ -631,19 +639,34 @@ def _plot_profile(
     )
     background_error = np.where(valid, background_salinity - truth_salinity, np.nan)
     heave_error = np.where(valid, heave_salinity - truth_salinity, np.nan)
-    bg_rmse = float(np.sqrt(np.nanmean(background_error ** 2)))
-    hv_rmse = float(np.sqrt(np.nanmean(heave_error ** 2)))
-    bg_bias = float(np.nanmean(background_error))
-    hv_bias = float(np.nanmean(heave_error))
+    stats_valid = valid.copy()
+    ml_rmse = float("nan")
+    ml_bias = float("nan")
     if ml_depth is not None and ml_truth_salinity is not None and ml_salinity is not None:
         ml_valid = np.isfinite(ml_truth_salinity) & np.isfinite(ml_salinity)
-        ml_error = np.where(ml_valid, ml_salinity - ml_truth_salinity, np.nan)
-        ml_rmse = float(np.sqrt(np.nanmean(ml_error ** 2)))
-        ml_bias = float(np.nanmean(ml_error))
+        ml_native_error = np.where(ml_valid, ml_salinity - ml_truth_salinity, np.nan)
+        ml_error = _interpolate_error_to_model_depth(
+            ml_depth,
+            ml_native_error,
+            depth,
+        )
+        stats_valid = stats_valid & np.isfinite(ml_error)
     else:
         ml_error = None
-        ml_rmse = float("nan")
-        ml_bias = float("nan")
+
+    if int(stats_valid.sum()) > 0:
+        bg_rmse = float(np.sqrt(np.nanmean(background_error[stats_valid] ** 2)))
+        hv_rmse = float(np.sqrt(np.nanmean(heave_error[stats_valid] ** 2)))
+        bg_bias = float(np.nanmean(background_error[stats_valid]))
+        hv_bias = float(np.nanmean(heave_error[stats_valid]))
+        if ml_error is not None:
+            ml_rmse = float(np.sqrt(np.nanmean(ml_error[stats_valid] ** 2)))
+            ml_bias = float(np.nanmean(ml_error[stats_valid]))
+    else:
+        bg_rmse = float("nan")
+        hv_rmse = float("nan")
+        bg_bias = float("nan")
+        hv_bias = float("nan")
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 7), constrained_layout=True)
 
@@ -690,7 +713,7 @@ def _plot_profile(
     if ml_error is not None and ml_depth is not None:
         axes[2].plot(
             ml_error,
-            ml_depth,
+            depth,
             color="tab:green",
             marker=".",
             markersize=3,
@@ -859,8 +882,12 @@ def main() -> None:
     )
     parser.add_argument("--profiles-file", type=Path, default=None)
     parser.add_argument(
-        "--surface-temp-threshold", type=float, default=None,
+        "--surface-temp-min", type=float, default=None,
         help="Minimum near-surface temperature to qualify (degC)",
+    )
+    parser.add_argument(
+        "--surface-temp-max", type=float, default=None,
+        help="Maximum near-surface temperature to qualify (degC)",
     )
     parser.add_argument(
         "--near-surface-depth-m", type=float, default=None,
@@ -889,6 +916,26 @@ def main() -> None:
     parser.add_argument(
         "--max-stats-depth-m", type=float, default=None,
         help="Deepest model depth included in aggregate depth statistics.",
+    )
+    parser.add_argument(
+        "--max-background-temperature-rmse",
+        type=float,
+        default=None,
+        help=(
+            "Skip profile/background pairs whose background temperature RMSE "
+            "against Argo temperature exceeds this value (degC). Defaults to "
+            "argo.max_background_temperature_rmse or 1.0."
+        ),
+    )
+    parser.add_argument(
+        "--max-background-salinity-rmse",
+        type=float,
+        default=None,
+        help=(
+            "Skip profile/background pairs whose background salinity RMSE "
+            "against Argo salinity exceeds this value (PSU). Defaults to "
+            "argo.max_background_salinity_rmse or 1.0."
+        ),
     )
     parser.add_argument(
         "--salinity-min", type=float, default=None,
@@ -969,11 +1016,24 @@ def main() -> None:
         if args.near_surface_depth_m is not None
         else argo_cfg.get("near_surface_depth_m", 30.0)
     )
-    surface_temp_threshold = float(
-        args.surface_temp_threshold
-        if args.surface_temp_threshold is not None
-        else argo_cfg.get("surface_temperature_threshold", 20.0)
+    surface_temp_min = float(
+        args.surface_temp_min
+        if args.surface_temp_min is not None
+        else argo_cfg.get(
+            "surface_temperature_min",
+            argo_cfg.get("surface_temperature_threshold", 20.0),
+        )
     )
+    surface_temp_max = float(
+        args.surface_temp_max
+        if args.surface_temp_max is not None
+        else argo_cfg.get("surface_temperature_max", float("inf"))
+    )
+    if surface_temp_min > surface_temp_max:
+        raise ValueError(
+            "surface temperature range is invalid: "
+            f"min {surface_temp_min} > max {surface_temp_max}"
+        )
     search_radius_deg = float(
         args.background_search_radius_deg
         if args.background_search_radius_deg is not None
@@ -994,9 +1054,27 @@ def main() -> None:
         if args.max_stats_depth_m is not None
         else argo_cfg.get("max_stats_depth_m", 2000.0)
     )
+    max_background_temperature_rmse = float(
+        args.max_background_temperature_rmse
+        if args.max_background_temperature_rmse is not None
+        else argo_cfg.get("max_background_temperature_rmse", 1.0)
+    )
+    if max_background_temperature_rmse < 0.0:
+        raise ValueError(
+            "max background temperature RMSE must be non-negative, got "
+            f"{max_background_temperature_rmse}"
+        )
+    max_background_salinity_rmse = float(
+        args.max_background_salinity_rmse
+        if args.max_background_salinity_rmse is not None
+        else argo_cfg.get("max_background_salinity_rmse", 1.0)
+    )
+    if max_background_salinity_rmse < 0.0:
+        raise ValueError(
+            "max background salinity RMSE must be non-negative, got "
+            f"{max_background_salinity_rmse}"
+    )
     stats_level_indices = np.flatnonzero(model_depth <= max_stats_depth_m)
-    stats_depth_mask = np.zeros(model_depth.shape, dtype=bool)
-    stats_depth_mask[stats_level_indices] = True
     if stats_level_indices.size == 0:
         raise ValueError(
             f"No model depths are shallower than max_stats_depth_m={max_stats_depth_m}"
@@ -1012,9 +1090,23 @@ def main() -> None:
     print(f"Profiles file            : {profiles_file}")
     print(f"Total retained profiles  : {int(valid_profile.sum())}")
     print(f"Near-surface depth       : {near_surface_depth_m:.0f} m")
-    print(f"Surface T threshold      : {surface_temp_threshold:.1f} °C")
+    if np.isfinite(surface_temp_max):
+        print(
+            "Surface T range         : "
+            f"[{surface_temp_min:.1f}, {surface_temp_max:.1f}] °C"
+        )
+    else:
+        print(f"Surface T range         : >= {surface_temp_min:.1f} °C")
     print(f"Background search radius : {search_radius_deg:.1f} deg")
     print(f"Stats max depth          : {max_stats_depth_m:.0f} m")
+    print(
+        "Background temperature QC: "
+        f"RMSE <= {max_background_temperature_rmse:.2f} degC"
+    )
+    print(
+        "Background salinity QC  : "
+        f"RMSE <= {max_background_salinity_rmse:.2f} PSU"
+    )
     print(f"Salinity valid range     : [{salinity_min:.1f}, {salinity_max:.1f}] PSU")
     print(
         f"Salinity points dropped  : {int(dropped_salinity.sum())} "
@@ -1026,6 +1118,8 @@ def main() -> None:
     n_qualifying = 0
     n_processed = 0
     n_no_background = 0
+    n_temperature_qc_rejected = 0
+    n_salinity_qc_rejected = 0
     all_bg_rmse: list[float] = []
     all_hv_rmse: list[float] = []
     depth_count = np.zeros(model_depth.shape, dtype=np.int64)
@@ -1046,7 +1140,11 @@ def main() -> None:
             temperature[truth_index], model_depth,
             valid_mask[truth_index], near_surface_depth_m,
         )
-        if not np.isfinite(surf_temp) or surf_temp < surface_temp_threshold:
+        if (
+            not np.isfinite(surf_temp)
+            or surf_temp < surface_temp_min
+            or surf_temp > surface_temp_max
+        ):
             continue
 
         n_qualifying += 1
@@ -1089,12 +1187,31 @@ def main() -> None:
         bg_sal = salinity[background_index, selected]
         thickness = _centers_to_thickness(sel_depth)
 
+        temp_err = bg_temp - truth_temp
+        temp_rmse = float(np.sqrt(np.nanmean(temp_err ** 2)))
+        if (
+            not np.isfinite(temp_rmse)
+            or temp_rmse > max_background_temperature_rmse
+        ):
+            n_temperature_qc_rejected += 1
+            continue
+
+        bg_err = bg_sal - truth_sal
+        bg_rmse = float(np.sqrt(np.nanmean(bg_err ** 2)))
+        if (
+            not np.isfinite(bg_rmse)
+            or bg_rmse > max_background_salinity_rmse
+        ):
+            n_salinity_qc_rejected += 1
+            continue
+
         heave_sal, _ = _apply_heave(emulator, truth_temp, bg_temp, bg_sal, thickness)
 
         ml_depth = None
         ml_truth_sal = None
         ml_sal = None
         ml_rmse = None
+        ml_error_on_model_depth = None
         if ml_emulator is not None:
             (
                 ml_sal,
@@ -1114,41 +1231,48 @@ def main() -> None:
             ml_error = ml_sal - ml_truth_sal
             ml_valid = np.isfinite(ml_error)
             if int(ml_valid.sum()) > 0:
-                ml_rmse = float(np.sqrt(np.nanmean(ml_error[ml_valid] ** 2)))
-                all_ml_rmse.append(ml_rmse)
                 ml_error_on_model_depth = _interpolate_error_to_model_depth(
                     ml_depth,
                     ml_error,
                     model_depth,
                 )
-                finite_ml = (
-                    np.isfinite(ml_error_on_model_depth)
-                    & stats_depth_mask
-                    & common_valid
-                )
-                depth_ml_count[finite_ml] += 1
-                depth_ml_error_sum[finite_ml] += ml_error_on_model_depth[finite_ml]
-                depth_ml_error_sumsq[finite_ml] += (
-                    ml_error_on_model_depth[finite_ml] ** 2
-                )
 
-        bg_err = bg_sal - truth_sal
         hv_err = heave_sal - truth_sal
-        bg_rmse = float(np.sqrt(np.nanmean(bg_err ** 2)))
-        hv_rmse = float(np.sqrt(np.nanmean(hv_err ** 2)))
+        finite_profile_error = np.isfinite(bg_err) & np.isfinite(hv_err)
+        if ml_error_on_model_depth is not None:
+            ml_selected_error = ml_error_on_model_depth[selected]
+            finite_profile_error = (
+                finite_profile_error & np.isfinite(ml_selected_error)
+            )
+        else:
+            ml_selected_error = None
+        if int(finite_profile_error.sum()) == 0:
+            continue
+
+        bg_rmse = float(np.sqrt(np.nanmean(bg_err[finite_profile_error] ** 2)))
+        hv_rmse = float(np.sqrt(np.nanmean(hv_err[finite_profile_error] ** 2)))
         all_bg_rmse.append(bg_rmse)
         all_hv_rmse.append(hv_rmse)
-        finite_error = (
-            np.isfinite(bg_err)
-            & np.isfinite(hv_err)
-            & (sel_depth <= max_stats_depth_m)
-        )
+        if ml_selected_error is not None:
+            ml_rmse = float(
+                np.sqrt(np.nanmean(ml_selected_error[finite_profile_error] ** 2))
+            )
+            all_ml_rmse.append(ml_rmse)
+
+        finite_error = finite_profile_error & (sel_depth <= max_stats_depth_m)
         finite_selected = selected[finite_error]
-        depth_count[finite_selected] += 1
-        depth_bg_error_sum[finite_selected] += bg_err[finite_error]
-        depth_bg_error_sumsq[finite_selected] += bg_err[finite_error] ** 2
-        depth_hv_error_sum[finite_selected] += hv_err[finite_error]
-        depth_hv_error_sumsq[finite_selected] += hv_err[finite_error] ** 2
+        if finite_selected.size > 0:
+            depth_count[finite_selected] += 1
+            depth_bg_error_sum[finite_selected] += bg_err[finite_error]
+            depth_bg_error_sumsq[finite_selected] += bg_err[finite_error] ** 2
+            depth_hv_error_sum[finite_selected] += hv_err[finite_error]
+            depth_hv_error_sumsq[finite_selected] += hv_err[finite_error] ** 2
+            if ml_selected_error is not None:
+                depth_ml_count[finite_selected] += 1
+                depth_ml_error_sum[finite_selected] += ml_selected_error[finite_error]
+                depth_ml_error_sumsq[finite_selected] += (
+                    ml_selected_error[finite_error] ** 2
+                )
 
         lon_t = float(longitude[truth_index])
         lat_t = float(latitude[truth_index])
@@ -1195,6 +1319,8 @@ def main() -> None:
     print(f"Qualifying profiles  : {n_qualifying}")
     print(f"Plots written        : {n_processed}")
     print(f"No background found  : {n_no_background}")
+    print(f"Temperature QC rejected : {n_temperature_qc_rejected}")
+    print(f"Salinity QC rejected : {n_salinity_qc_rejected}")
     if all_bg_rmse:
         bg_depth_rmse, bg_depth_bias = _depth_stats_from_sums(
             depth_count, depth_bg_error_sum, depth_bg_error_sumsq,

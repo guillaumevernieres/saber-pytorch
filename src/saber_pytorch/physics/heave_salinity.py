@@ -61,6 +61,9 @@ class WeaverTSBalance(nn.Module):
     epsilon_taper: float
     amplitude: float
     use_temperature_gradient_taper: bool
+    suppress_shallow_weak_stratification: bool
+    shallow_taper_depth_m: float
+    shallow_epsilon_taper: float
 
     def __init__(
         self,
@@ -70,6 +73,9 @@ class WeaverTSBalance(nn.Module):
         epsilon_taper: float = 1.0e-3,
         amplitude: float = 1.0,
         use_temperature_gradient_taper: bool = True,
+        suppress_shallow_weak_stratification: bool = False,
+        shallow_taper_depth_m: float = 50.0,
+        shallow_epsilon_taper: float = 1.0e-4,
     ) -> None:
         """
         Args:
@@ -80,6 +86,12 @@ class WeaverTSBalance(nn.Module):
                 Use ~1.0e-3 for a threshold near 0.032 °C/m (thermocline).
             amplitude:    scalar multiplier α₀ for K_ST (default 1.0).
             use_temperature_gradient_taper: whether to apply w_T taper.
+            suppress_shallow_weak_stratification: apply a stronger
+                temperature-gradient taper above shallow_taper_depth_m.
+            shallow_taper_depth_m: layer-centre depth threshold for the
+                shallow weak-stratification taper.
+            shallow_epsilon_taper: ε_T used above shallow_taper_depth_m when
+                suppress_shallow_weak_stratification is enabled.
         """
         super().__init__()
         if len(input_names) != 3:
@@ -100,6 +112,11 @@ class WeaverTSBalance(nn.Module):
         self.use_temperature_gradient_taper = bool(
             use_temperature_gradient_taper
         )
+        self.suppress_shallow_weak_stratification = bool(
+            suppress_shallow_weak_stratification
+        )
+        self.shallow_taper_depth_m = float(shallow_taper_depth_m)
+        self.shallow_epsilon_taper = float(shallow_epsilon_taper)
 
     def _split_inputs(
         self, inputs: torch.Tensor
@@ -152,6 +169,15 @@ class WeaverTSBalance(nn.Module):
         valid = dz > min_thickness
         return torch.where(valid, deriv, torch.zeros_like(deriv))
 
+    def _layer_center_depth(
+        self,
+        dz: torch.Tensor,
+        min_thickness: float = 1.0e-12,
+    ) -> torch.Tensor:
+        """Return layer-centre depth, z positive downward."""
+        safe_dz = torch.clamp(dz, min=min_thickness)
+        return torch.cumsum(safe_dz, dim=1) - safe_dz * 0.5
+
     def _compute_jacobian(
         self,
         T_bg: torch.Tensor,
@@ -165,7 +191,16 @@ class WeaverTSBalance(nn.Module):
 
         T_z2 = T_z * T_z
         if self.use_temperature_gradient_taper:
-            w_T = T_z2 / (T_z2 + self.epsilon_taper)
+            epsilon_taper = torch.full_like(T_z, self.epsilon_taper)
+            if self.suppress_shallow_weak_stratification:
+                z = self._layer_center_depth(dz)
+                shallow_epsilon = torch.full_like(T_z, self.shallow_epsilon_taper)
+                epsilon_taper = torch.where(
+                    z <= self.shallow_taper_depth_m,
+                    shallow_epsilon,
+                    epsilon_taper,
+                )
+            w_T = T_z2 / (T_z2 + epsilon_taper)
         else:
             w_T = torch.ones_like(T_z)
 

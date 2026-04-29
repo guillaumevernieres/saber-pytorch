@@ -22,6 +22,9 @@ def make_emulator(
     amplitude: float = 1.0,
     use_taper: bool = True,
     epsilon_taper: float = 1.0e-3,
+    suppress_shallow_weak_stratification: bool = False,
+    shallow_taper_depth_m: float = 50.0,
+    shallow_epsilon_taper: float = 1.0e-4,
 ) -> WeaverTSBalance:
     input_names: List[str] = [T_NAME, S_NAME, DZ_NAME]
     output_names: List[str] = [OUT_NAME]
@@ -32,6 +35,9 @@ def make_emulator(
         epsilon_taper=epsilon_taper,
         amplitude=amplitude,
         use_temperature_gradient_taper=use_taper,
+        suppress_shallow_weak_stratification=suppress_shallow_weak_stratification,
+        shallow_taper_depth_m=shallow_taper_depth_m,
+        shallow_epsilon_taper=shallow_epsilon_taper,
     )
 
 
@@ -138,6 +144,28 @@ def test_weak_temperature_gradient_is_finite_and_tapered():
 
     assert torch.isfinite(dS).all()
     assert torch.allclose(dS, torch.zeros_like(dS))
+
+
+def test_shallow_weak_stratification_taper_only_changes_shallow_levels():
+    base = make_emulator(epsilon_taper=1.0e-6)
+    shallow = make_emulator(
+        epsilon_taper=1.0e-6,
+        suppress_shallow_weak_stratification=True,
+        shallow_taper_depth_m=30.0,
+        shallow_epsilon_taper=1.0e-4,
+    )
+    state = make_state(nnodes=1)
+    mask = torch.ones(1, 1, dtype=torch.float64)
+
+    base_diag = torch.diagonal(
+        base.jac_from_state(state, mask)[:, :, :NLEVELS], dim1=1, dim2=2
+    )
+    shallow_diag = torch.diagonal(
+        shallow.jac_from_state(state, mask)[:, :, :NLEVELS], dim1=1, dim2=2
+    )
+
+    assert torch.all(torch.abs(shallow_diag[:, :3]) < torch.abs(base_diag[:, :3]))
+    assert torch.allclose(shallow_diag[:, 3:], base_diag[:, 3:])
 
 
 def test_zero_thickness_layers_are_finite_and_zeroed():

@@ -16,14 +16,17 @@ input:
 
 model:
   epsilon: 1.0e-12
-  epsilon_taper: 1.0e-3
+  epsilon_taper: 1.0e-6
   amplitude: 1.0
   use_temperature_gradient_taper: true
+  suppress_shallow_weak_stratification: true
+  shallow_taper_depth_m: 150.0
+  shallow_epsilon_taper: 1.0e-0
   min_valid_thickness_m: 0.1
 
 ml_salinity:
   enabled: true
-  checkpoint: /home/gvernier/sandboxes/saber-pytorch/emulators/salinity_profile/scripts/
+  checkpoint: /home/gvernier/sandboxes/saber-pytorch/emulators/ml_salinity/scripts/models_salt_profile/best_model.pt
 
 argo:
   profiles_file: emulators/heave_salinity/outputs/argo_ts_profiles.npz
