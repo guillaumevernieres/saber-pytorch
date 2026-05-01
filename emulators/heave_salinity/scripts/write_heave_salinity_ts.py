@@ -136,7 +136,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--dz-name",
-        default="ocean_layer_thickness",
+        default="sea_water_cell_thickness",
         help="Packed layer-thickness input field name",
     )
     parser.add_argument(

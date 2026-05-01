@@ -11,7 +11,7 @@ Usage
         --output   steric_height_emulator.ts \\
         [--T-name  sea_water_potential_temperature] \\
         [--S-name  sea_water_salinity] \\
-        [--dz-name ocean_layer_thickness] \\
+        [--dz-name sea_water_cell_thickness] \\
         [--ssh-name sea_surface_height_above_geoid] \\
         [--rho0    1025.0]
 
@@ -41,7 +41,7 @@ def build_and_save(
     output_path: str,
     T_name: str = "sea_water_potential_temperature",
     S_name: str = "sea_water_salinity",
-    dz_name: str = "ocean_layer_thickness",
+    dz_name: str = "sea_water_cell_thickness",
     ssh_name: str = "sea_surface_height_above_geoid",
     rho0: float = 1025.0,
 ) -> None:
@@ -94,7 +94,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, help="Output .ts path")
     parser.add_argument("--T-name", default="sea_water_potential_temperature")
     parser.add_argument("--S-name", default="sea_water_salinity")
-    parser.add_argument("--dz-name", default="ocean_layer_thickness")
+    parser.add_argument("--dz-name", default="sea_water_cell_thickness")
     parser.add_argument("--ssh-name", default="sea_surface_height_above_geoid")
     parser.add_argument("--rho0", type=float, default=1025.0)
     args = parser.parse_args()
