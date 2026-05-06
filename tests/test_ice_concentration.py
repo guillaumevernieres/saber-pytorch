@@ -182,6 +182,35 @@ def test_d_aice_d_hs_decreases_with_hs():
 
 
 # ------------------------------------------------------------------
+# Freezing-point cutoff
+# ------------------------------------------------------------------
+
+
+def test_jacobian_zero_when_far_from_freezing_point():
+    em = make_emulator()
+    mask = torch.ones(1, 1)
+    sss = 34.0
+    far_warm_sst = 2.0
+    jac = em.jac_physical(
+        torch.tensor([[far_warm_sst, sss, 0.5, 0.1, 0.5]]), mask
+    )
+    assert torch.all(jac == 0.0)
+
+
+
+def test_jacobian_nonzero_when_near_freezing_point():
+    em = make_emulator()
+    mask = torch.ones(1, 1)
+    sss = torch.tensor(34.0)
+    tf = em.tf0 + em.tf_s_linear * sss + em.tf_s_pow * sss * torch.sqrt(sss)
+    near_sst = tf.item() + 0.1
+    jac = em.jac_physical(
+        torch.tensor([[near_sst, sss.item(), 0.5, 0.1, 0.5]]), mask
+    )
+    assert torch.any(jac != 0.0)
+
+
+# ------------------------------------------------------------------
 # forward() linear-map contract
 # ------------------------------------------------------------------
 
@@ -234,4 +263,6 @@ def test_torchscript_save_load_roundtrip():
 
     assert torch.allclose(jac_before, jac_after)
     assert loaded.input_names == [SST_NAME, SSS_NAME, HI_NAME, HS_NAME, AICE_NAME]
+    assert loaded.input_levels == [0, 0, 0, 0, 0]
     assert loaded.output_names == [OUT_NAME]
+    assert loaded.output_levels == [0]

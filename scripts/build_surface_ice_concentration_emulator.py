@@ -34,10 +34,19 @@ def _parse_names(raw: str, expected: int, label: str) -> List[str]:
     return names
 
 
+def _parse_levels(raw: str, expected: int, label: str) -> List[int]:
+    levels = [int(x.strip()) for x in raw.split(",") if x.strip()]
+    if len(levels) != expected:
+        raise ValueError(f"--{label}: expected {expected} levels, got {len(levels)}")
+    return levels
+
+
 def build_and_save(
     output_path: str,
     input_names: List[str],
     output_names: List[str],
+    input_levels: List[int],
+    output_levels: List[int],
     alpha_t: float,
     alpha_hi: float,
     alpha_hs: float,
@@ -47,10 +56,13 @@ def build_and_save(
     tf0: float,
     tf_s_linear: float,
     tf_s_pow: float,
+    freezing_tolerance: float,
 ) -> None:
     emulator = SurfaceIceConcentrationEmulator(
         input_names=input_names,
         output_names=output_names,
+        input_levels=input_levels,
+        output_levels=output_levels,
         alpha_t=alpha_t,
         alpha_hi=alpha_hi,
         alpha_hs=alpha_hs,
@@ -60,6 +72,7 @@ def build_and_save(
         tf0=tf0,
         tf_s_linear=tf_s_linear,
         tf_s_pow=tf_s_pow,
+        freezing_tolerance=freezing_tolerance,
     ).eval()
 
     scripted = torch.jit.script(emulator)
@@ -77,12 +90,15 @@ def build_and_save(
 
     print(f"Saved: {output_path}")
     print(f"  input_names  ({_INPUT_SIZE}): {input_names}")
+    print(f"  input_levels ({_INPUT_SIZE}): {input_levels}")
     print(f"  output_names      (1): {output_names}")
+    print(f"  output_levels     (1): {output_levels}")
     print(
         "  coefficients: "
         f"alpha_t={alpha_t}, alpha_hi={alpha_hi}, alpha_hs={alpha_hs}, "
         f"hi_scale={hi_scale}, hs_scale={hs_scale}, w_min={w_min}, "
-        f"tf0={tf0}, tf_s_linear={tf_s_linear}, tf_s_pow={tf_s_pow}"
+        f"tf0={tf0}, tf_s_linear={tf_s_linear}, tf_s_pow={tf_s_pow}, "
+        f"freezing_tolerance={freezing_tolerance}"
     )
     print(f"  jac_physical runtime shape: [nnodes, 1, {_OUTPUT_JAC_COLS}]")
 
@@ -94,7 +110,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, help="Output .ts path")
     parser.add_argument(
         "--input-names",
-        default="sea_surface_temperature,sea_surface_salinity,sea_ice_thickness,surface_snow_thickness,sea_ice_area_fraction",
+        default="sea_water_potential_temperature,sea_water_salinity,sea_ice_thickness,sea_ice_snow_thickness,sea_ice_area_fraction",
         help=(
             "Comma-separated input variable names in packed order [sst,sss,hi,hs,aice_prior]"
         ),
@@ -103,6 +119,18 @@ def main() -> None:
         "--output-names",
         default="sea_ice_area_fraction",
         help="Comma-separated output variable names (exactly one)",
+    )
+    parser.add_argument(
+        "--input-levels",
+        default="0,0,0,0,0",
+        help=(
+            "Comma-separated input level indices in packed order [sst,sss,hi,hs,aice_prior]"
+        ),
+    )
+    parser.add_argument(
+        "--output-levels",
+        default="0",
+        help="Comma-separated output level indices (exactly one)",
     )
     parser.add_argument("--alpha-t", type=float, default=1.0)
     parser.add_argument("--alpha-hi", type=float, default=0.2)
@@ -113,12 +141,20 @@ def main() -> None:
     parser.add_argument("--tf0", type=float, default=0.0901)
     parser.add_argument("--tf-s-linear", type=float, default=-0.0575)
     parser.add_argument("--tf-s-pow", type=float, default=1.710523e-3)
+    parser.add_argument(
+        "--freezing-tolerance",
+        type=float,
+        default=1.0,
+        help="Maximum |sst_bg - Tf(sss_bg)| allowed before the Jacobian is zeroed",
+    )
     args = parser.parse_args()
 
     build_and_save(
         output_path=args.output,
         input_names=_parse_names(args.input_names, _INPUT_SIZE, "input-names"),
         output_names=_parse_names(args.output_names, 1, "output-names"),
+        input_levels=_parse_levels(args.input_levels, _INPUT_SIZE, "input-levels"),
+        output_levels=_parse_levels(args.output_levels, 1, "output-levels"),
         alpha_t=args.alpha_t,
         alpha_hi=args.alpha_hi,
         alpha_hs=args.alpha_hs,
@@ -128,6 +164,7 @@ def main() -> None:
         tf0=args.tf0,
         tf_s_linear=args.tf_s_linear,
         tf_s_pow=args.tf_s_pow,
+        freezing_tolerance=args.freezing_tolerance,
     )
 
 

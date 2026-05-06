@@ -29,7 +29,17 @@ The prior ice concentration determines a state-dependent sensitivity weight:
 This weight is maximum at a = 0.5 (maximum marginal ice zone sensitivity)
 and equals w_min at a = 0 or a = 1 (open ocean or complete ice cover).
 
-Partial derivatives:
+The local freezing temperature is approximated as:
+
+    S = max(SSS, 0)
+    Tf = tf0 + tf_s_linear * S + tf_s_pow * S * sqrt(S)
+
+The Jacobian is active only when the background state is close enough to the
+freezing point:
+
+    active = |SST - Tf| <= freezing_tolerance
+
+Partial derivatives for active nodes:
 
     d(aice)/dSST = -alpha_t * w
     d(aice)/dSSS =  alpha_t * dTf/dSSS * w
@@ -39,6 +49,8 @@ Partial derivatives:
 where
 
     dTf/dSSS = tf_s_linear + 1.5 * tf_s_pow * sqrt(max(SSS, 0))
+
+For inactive nodes, all Jacobian entries are zero.
 
 Sign expectations:
     d(aice)/dSST <= 0
@@ -50,7 +62,9 @@ SABER TorchBalance surface contract
 ------------------------------------
 Attributes:
   input_names  : List[str]  (5 names: [sst, sss, hi, hs, aice])
+    input_levels : List[int]  (5 levels, typically all zeros for surface fields)
   output_names : List[str]  (1 name:  [aice])
+    output_levels: List[int]  (1 level, typically [0])
 
 Method called by C++:
   jac_physical(inputs: Tensor, mask: Tensor) -> Tensor
@@ -66,7 +80,7 @@ forward():
     return:       [nnodes, 1]  = delta_aice
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -76,7 +90,9 @@ class SurfaceIceConcentrationEmulator(nn.Module):
     """Prior-state Jacobian provider for sea-ice concentration balance."""
 
     input_names: List[str]
+    input_levels: List[int]
     output_names: List[str]
+    output_levels: List[int]
     alpha_t: float
     alpha_hi: float
     alpha_hs: float
@@ -86,11 +102,14 @@ class SurfaceIceConcentrationEmulator(nn.Module):
     tf0: float
     tf_s_linear: float
     tf_s_pow: float
+    freezing_tolerance: float
 
     def __init__(
         self,
         input_names: List[str],
         output_names: List[str],
+        input_levels: Optional[List[int]] = None,
+        output_levels: Optional[List[int]] = None,
         alpha_t: float = 1.0,
         alpha_hi: float = 0.2,
         alpha_hs: float = 0.1,
@@ -100,6 +119,7 @@ class SurfaceIceConcentrationEmulator(nn.Module):
         tf0: float = 0.0901,
         tf_s_linear: float = -0.0575,
         tf_s_pow: float = 1.710523e-3,
+        freezing_tolerance: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -111,6 +131,22 @@ class SurfaceIceConcentrationEmulator(nn.Module):
         if len(output_names) != 1:
             raise ValueError(
                 "SurfaceIceConcentrationEmulator requires exactly 1 output name"
+            )
+        resolved_input_levels = (
+            [0] * len(input_names) if input_levels is None else list(input_levels)
+        )
+        resolved_output_levels = (
+            [0] * len(output_names) if output_levels is None else list(output_levels)
+        )
+        if len(resolved_input_levels) != len(input_names):
+            raise ValueError(
+                f"input_levels length ({len(resolved_input_levels)}) must match "
+                f"input_names length ({len(input_names)})"
+            )
+        if len(resolved_output_levels) != len(output_names):
+            raise ValueError(
+                f"output_levels length ({len(resolved_output_levels)}) must match "
+                f"output_names length ({len(output_names)})"
             )
         if alpha_t < 0.0:
             raise ValueError("alpha_t must be >= 0.0")
@@ -124,9 +160,13 @@ class SurfaceIceConcentrationEmulator(nn.Module):
             raise ValueError("hs_scale must be > 0.0")
         if w_min < 0.0 or w_min > 1.0:
             raise ValueError("w_min must be in [0, 1]")
+        if freezing_tolerance < 0.0:
+            raise ValueError("freezing_tolerance must be >= 0.0")
 
         self.input_names = list(input_names)
+        self.input_levels = resolved_input_levels
         self.output_names = list(output_names)
+        self.output_levels = resolved_output_levels
         self.alpha_t = float(alpha_t)
         self.alpha_hi = float(alpha_hi)
         self.alpha_hs = float(alpha_hs)
@@ -136,6 +176,13 @@ class SurfaceIceConcentrationEmulator(nn.Module):
         self.tf0 = float(tf0)
         self.tf_s_linear = float(tf_s_linear)
         self.tf_s_pow = float(tf_s_pow)
+        self.freezing_tolerance = float(freezing_tolerance)
+
+    def _freezing_temperature(self, sss_bg: torch.Tensor) -> torch.Tensor:
+        sss_eff = torch.clamp(sss_bg, min=0.0)
+        return self.tf0 + self.tf_s_linear * sss_eff + self.tf_s_pow * sss_eff * torch.sqrt(
+            sss_eff
+        )
 
     def _compute_jacobian(
         self,
@@ -150,7 +197,10 @@ class SurfaceIceConcentrationEmulator(nn.Module):
         w = self.w_min + (1.0 - self.w_min) * 4.0 * a * (1.0 - a)
 
         sss_eff = torch.clamp(sss_bg, min=0.0)
+        tf_bg = self._freezing_temperature(sss_bg)
         dTf_dS = self.tf_s_linear + 1.5 * self.tf_s_pow * torch.sqrt(sss_eff)
+        active = (torch.abs(sst_bg - tf_bg) <= self.freezing_tolerance).to(mask.dtype)
+        effective_mask = mask * active.unsqueeze(1)
 
         hi_eff = torch.clamp(hi_bg, min=0.0)
         hs_eff = torch.clamp(hs_bg, min=0.0)
@@ -164,7 +214,7 @@ class SurfaceIceConcentrationEmulator(nn.Module):
             [d_aice_d_sst, d_aice_d_sss, d_aice_d_hi, d_aice_d_hs],
             dim=1,
         ).unsqueeze(1)
-        return jac * mask.unsqueeze(2)
+        return jac * effective_mask.unsqueeze(2)
 
     def forward(
         self,
