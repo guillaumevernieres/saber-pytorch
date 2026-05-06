@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 from saber_pytorch.ml.cf_mappings import CF_ATM, CF_OCN
 from saber_pytorch.ml.ml_balance import FFNNSalinityProfileEmulator, FFNNVerticalEmulator
 

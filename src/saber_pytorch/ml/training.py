@@ -11,7 +11,7 @@ Adapted from aibalance/ufsemulator/training.py with the following changes:
   FFNN.forward() (which operates in normalized space) is used correctly.
 
 Quick-start:
-    python scripts/train_ml_balance.py --config emulators/aice/config.yaml
+    python scripts/train_ml_balance.py --config emulators/ml_aice/config.yaml
 
 Distributed (SLURM):
     sbatch hpc/train_distributed.sh

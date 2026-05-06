@@ -7,27 +7,27 @@ and multi-node distributed training (DDP via SLURM or torchrun).
 Usage
 -----
     # Single node:
-    python scripts/train_ml_balance.py --config emulators/aice/config.yaml
+    python scripts/train_ml_balance.py --config emulators/ml_aice/config.yaml
 
     # Override data path:
-    python scripts/train_ml_balance.py --config emulators/aice/config.yaml \\
+    python scripts/train_ml_balance.py --config emulators/ml_aice/config.yaml \\
         --data-path /path/to/data.npz
 
     # Resume from a checkpoint:
-    python scripts/train_ml_balance.py --config emulators/aice/config.yaml \\
+    python scripts/train_ml_balance.py --config emulators/ml_aice/config.yaml \\
         --restart-checkpoint models_aice/checkpoint_epoch_200.pt
 
     # Distributed (usually invoked by hpc/train_distributed.sh):
-    srun python scripts/train_ml_balance.py --config emulators/aice/config.yaml
+    srun python scripts/train_ml_balance.py --config emulators/ml_aice/config.yaml
 
 Workflow summary
 ----------------
 1. Prepare training data (if not done yet):
-       python scripts/prepare_training_data.py --config emulators/aice/config.yaml \\
+       python scripts/prepare_training_data.py --config emulators/ml_aice/config.yaml \\
            --atm path/to/atm.nc --ocn path/to/ocn.nc --output data/aice.npz
 
 2. Train:
-       python scripts/train_ml_balance.py --config emulators/aice/config.yaml
+       python scripts/train_ml_balance.py --config emulators/ml_aice/config.yaml
 
 3. Export to TorchScript for SABER:
        python scripts/build_surface_ml_balance_emulator.py \\

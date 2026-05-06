@@ -16,7 +16,7 @@ import torch
 import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parents[2]
+REPO_ROOT = SCRIPT_DIR.parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from saber_pytorch.physics.heave_salinity import WeaverTSBalance

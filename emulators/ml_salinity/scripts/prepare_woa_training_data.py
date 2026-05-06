@@ -8,7 +8,7 @@ train_ml_balance.py.
 
 Usage
 -----
-    python scripts/prepare_woa_training_data.py \\
+    python emulators/ml_salinity/scripts/prepare_woa_training_data.py \\
         --woa-file   /path/to/woa23_B5C2_st00_01.nc \\
         --model-depth-file  /path/to/MOM.res.nc \\
         --config     tests/salinity/config.local.yaml \\
@@ -36,7 +36,7 @@ from pathlib import Path
 import netCDF4 as nc
 import numpy as np
 
-_REPO = Path(__file__).resolve().parents[1]
+_REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO / "src"))
 
 from saber_pytorch.ml.data import UFSEmulatorDataBuilder  # noqa: E402

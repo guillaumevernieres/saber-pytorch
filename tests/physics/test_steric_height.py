@@ -17,13 +17,10 @@ Validates:
 """
 
 import tempfile
-from pathlib import Path
 from typing import Dict, List
 
 import torch
-import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from saber_pytorch.physics.steric_height import StericHeightEmulator, depth_to_pressure
 
 NLEVELS = 6

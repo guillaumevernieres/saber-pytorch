@@ -3,7 +3,7 @@
 
 Usage
 -----
-python scripts/build_surface_ice_concentration_emulator.py \
+python emulators/surface_ice_concentration/scripts/build_surface_ice_concentration_emulator.py \
     --output surface_ice_concentration.ts
 """
 
@@ -14,7 +14,7 @@ from typing import List
 
 import torch
 
-_SRC = str(Path(__file__).resolve().parents[1] / "src")
+_SRC = str(Path(__file__).resolve().parents[3] / "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 

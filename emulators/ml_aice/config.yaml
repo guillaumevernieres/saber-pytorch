@@ -5,11 +5,11 @@
 #
 # Typical workflow:
 #   python scripts/prepare_training_data.py \
-#       --config emulators/aice/config.yaml \
+#       --config emulators/ml_aice/config.yaml \
 #       --atm path/to/atm.nc --ocn path/to/ice_ocean.nc \
 #       --output data/aice_training.npz
 #
-#   python scripts/train_ml_balance.py --config emulators/aice/config.yaml \
+#   python scripts/train_ml_balance.py --config emulators/ml_aice/config.yaml \
 #       --data-path data/aice_training.npz
 #
 #   python scripts/build_surface_ml_balance_emulator.py \

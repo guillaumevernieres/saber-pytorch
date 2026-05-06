@@ -56,7 +56,7 @@ echo "Data file     : ${DATA_FILE}"
 echo "Model dir     : ${MODEL_DIR}"
 echo "TorchScript   : ${OUTPUT_TS}"
 
-python "${REPO_ROOT}/scripts/prepare_woa_training_data.py" \
+python "${REPO_ROOT}/emulators/ml_salinity/scripts/prepare_woa_training_data.py" \
   --woa-file "${WOA_FILE}" \
   --model-depth-file "${MODEL_DEPTH_FILE}" \
   --config "${RUN_CONFIG}" \
@@ -66,6 +66,6 @@ python "${REPO_ROOT}/scripts/train_ml_balance.py" \
   --config "${RUN_CONFIG}" \
   --data-path "${DATA_FILE}"
 
-python "${REPO_ROOT}/scripts/build_vertical_ml_balance_emulator.py" \
+python "${REPO_ROOT}/emulators/ml_salinity/scripts/build_vertical_ml_balance_emulator.py" \
   --checkpoint "${CHECKPOINT}" \
   --output "${OUTPUT_TS}"

@@ -1,14 +1,11 @@
 """Tests for SurfaceIceConcentrationEmulator (prior-state Jacobian provider)."""
 
 import tempfile
-from pathlib import Path
 from typing import Dict, List
 
 import torch
-import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from saber_pytorch.physics.ice_concentration import SurfaceIceConcentrationEmulator  # noqa: E402
+from saber_pytorch.physics.ice_concentration import SurfaceIceConcentrationEmulator
 
 NNODES = 12
 SST_NAME = "sea_surface_temperature"

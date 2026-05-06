@@ -1,7 +1,7 @@
 # Minimal test / smoke-test config — quick to run on any dataset.
 #
 # Usage:
-#   python scripts/train_ml_balance.py --config emulators/aice/test.yaml \
+#   python scripts/train_ml_balance.py --config emulators/ml_aice/test.yaml \
 #       --data-path data/aice_training.npz
 
 model:

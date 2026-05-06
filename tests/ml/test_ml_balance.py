@@ -12,13 +12,10 @@ Validates:
 """
 
 import tempfile
-from pathlib import Path
 from typing import List
 
 import torch
-import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from saber_pytorch.ml.ffnn import FFNN
 from saber_pytorch.ml.ml_balance import FFNNSalinityProfileEmulator, FFNNSurfaceEmulator
 

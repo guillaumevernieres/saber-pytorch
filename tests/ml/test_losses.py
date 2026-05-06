@@ -1,11 +1,7 @@
 """Tests for optional training loss terms."""
 
-from pathlib import Path
-import sys
-
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from saber_pytorch.ml.ffnn import FFNN
 from saber_pytorch.ml.losses import VerticalSmoothnessLoss, build_loss_terms
 

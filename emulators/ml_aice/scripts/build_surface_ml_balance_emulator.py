@@ -49,7 +49,7 @@ priority order:
 
 Usage
 -----
-    python scripts/build_surface_ml_balance_emulator.py \\
+    python emulators/ml_aice/scripts/build_surface_ml_balance_emulator.py \\
         --checkpoint  /path/to/best_model.pt \\
         --output      surface_ml_balance.ts \\
         [--input-cf   "sst:sea_water_potential_temperature,sss:sea_water_salinity"] \\
@@ -65,7 +65,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 from saber_pytorch.ml.ml_balance import FFNNSurfaceEmulator
 
 

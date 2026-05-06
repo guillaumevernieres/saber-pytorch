@@ -22,7 +22,7 @@ import yaml
 from netCDF4 import Dataset
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parents[2]
+REPO_ROOT = SCRIPT_DIR.parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 os.environ.setdefault(
     "MPLCONFIGDIR",

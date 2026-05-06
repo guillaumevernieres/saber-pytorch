@@ -32,7 +32,7 @@ import torch
 import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parents[2]
+REPO_ROOT = SCRIPT_DIR.parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(SCRIPT_DIR))
 os.environ.setdefault(
@@ -67,7 +67,7 @@ def _load_argo_dataset(path: Path) -> Dict[str, np.ndarray]:
     if not path.exists():
         raise FileNotFoundError(
             f"{path} does not exist. "
-            "Build it with scripts/build_real_argo_ts_profiles.py"
+            "Build it with emulators/heave_salinity/scripts/build_real_argo_ts_profiles.py"
         )
     with np.load(path, allow_pickle=True) as data:
         required = [

@@ -7,7 +7,7 @@ from dz, so no separate depth field is needed.
 
 Usage
 -----
-    python scripts/build_steric_height_vertical_emulator.py \\
+    python emulators/steric_height/scripts/build_steric_height_vertical_emulator.py \\
         --output   steric_height_emulator.ts \\
         [--T-name  sea_water_potential_temperature] \\
         [--S-name  sea_water_salinity] \\
@@ -33,7 +33,7 @@ from typing import List
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 from saber_pytorch.physics.steric_height import StericHeightEmulator
 
 

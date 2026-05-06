@@ -87,7 +87,7 @@ To repeat the same investigation with real matched Argo T/S profile pairs, first
 build the reusable profile dataset:
 
 ```bash
-python scripts/build_real_argo_ts_profiles.py
+python emulators/heave_salinity/scripts/build_real_argo_ts_profiles.py
 ```
 
 By default this reads all paired 00Z Argo temperature/salinity diagnostics

@@ -1,14 +1,11 @@
 """Tests for WeaverTSBalance."""
 
 import tempfile
-from pathlib import Path
 from typing import Dict, List
 
 import torch
-import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from saber_pytorch.physics.heave_salinity import WeaverTSBalance  # noqa: E402
+from saber_pytorch.physics.heave_salinity import WeaverTSBalance
 
 NLEVELS = 6
 NNODES = 4

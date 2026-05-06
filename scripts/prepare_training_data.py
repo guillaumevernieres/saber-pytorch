@@ -8,13 +8,13 @@ result as a compressed .npz file suitable for train_ml_balance.py.
 Usage
 -----
     python scripts/prepare_training_data.py \\
-        --config   emulators/aice/config.yaml        \\
+        --config   emulators/ml_aice/config.yaml        \\
         --atm      /path/to/atm.nc          \\
         --ocn      /path/to/ice_ocean.nc    \\
         --output   data/training_aice.npz
 
 Atmosphere file is optional; omit --atm if your config uses ocean-only
-inputs (e.g. emulators/aice/both_domain.yaml without atmospheric variables).
+inputs (e.g. emulators/ml_aice/both_domain.yaml without atmospheric variables).
 
 The output .npz contains:
     inputs       : float32 [N, input_size]   — raw physical values
