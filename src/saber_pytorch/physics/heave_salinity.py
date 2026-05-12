@@ -64,6 +64,9 @@ class WeaverTSBalance(nn.Module):
     suppress_shallow_weak_stratification: bool
     shallow_taper_depth_m: float
     shallow_epsilon_taper: float
+    mask_var_name: str
+    mask_min: float
+    mask_max: float
 
     def __init__(
         self,
@@ -76,6 +79,9 @@ class WeaverTSBalance(nn.Module):
         suppress_shallow_weak_stratification: bool = False,
         shallow_taper_depth_m: float = 50.0,
         shallow_epsilon_taper: float = 1.0e-4,
+        mask_var_name: str = "",
+        mask_min: float = 0.0,
+        mask_max: float = 1.0,
     ) -> None:
         """
         Args:
@@ -117,6 +123,9 @@ class WeaverTSBalance(nn.Module):
         )
         self.shallow_taper_depth_m = float(shallow_taper_depth_m)
         self.shallow_epsilon_taper = float(shallow_epsilon_taper)
+        self.mask_var_name = mask_var_name
+        self.mask_min = float(mask_min)
+        self.mask_max = float(mask_max)
 
     def _split_inputs(
         self, inputs: torch.Tensor
@@ -266,18 +275,37 @@ class WeaverTSBalance(nn.Module):
         return self._compute_jacobian(T_bg, S_bg, dz, mask)
 
     @torch.jit.export
+    def compute_mask(self, mask_var: torch.Tensor) -> torch.Tensor:
+        """Compute binary domain mask from raw background values.
+
+        Args:
+            mask_var: [nnodes, 1] — background values of the mask variable
+                      (CF name: self.mask_var_name).
+
+        Returns:
+            [nnodes, 1] float32 mask (1 = active, 0 = outside valid range).
+        """
+        if self.mask_var_name == "":
+            return torch.ones(mask_var.shape[0], 1, dtype=mask_var.dtype, device=mask_var.device)
+        v = mask_var[:, 0]
+        valid = (v >= self.mask_min) & (v <= self.mask_max)
+        return valid.unsqueeze(1).to(mask_var.dtype)
+
+    @torch.jit.export
     def jac_physical(
         self,
         inputs: torch.Tensor,
-        mask: torch.Tensor,
+        mask_var: torch.Tensor,
         requested_row_indices: torch.Tensor,
         requested_col_indices: torch.Tensor,
     ) -> torch.Tensor:
         """Jacobian entries requested by TorchBalanceVerticalEmulator.cc."""
+        mask = self.compute_mask(mask_var)
         T_bg, S_bg, dz = self._split_inputs(inputs)
         jac_full = self._compute_jacobian(T_bg, S_bg, dz, mask)
         jac_rows = jac_full.index_select(1, requested_row_indices)
         gather_cols = requested_col_indices.view(1, -1, 1).expand(
             jac_full.shape[0], -1, 1
         )
-        return jac_rows.gather(2, gather_cols).squeeze(2)
+        jac = jac_rows.gather(2, gather_cols).squeeze(2)
+        return torch.where(torch.isfinite(jac), jac, torch.zeros_like(jac))

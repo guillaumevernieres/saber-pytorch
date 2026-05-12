@@ -38,6 +38,9 @@ class SurfaceIceConcentrationJacobian(nn.Module):
     tf0: float
     tf_s_linear: float
     tf_s_pow: float
+    mask_var_name: str
+    mask_min: float
+    mask_max: float
 
     def __init__(
         self,
@@ -54,6 +57,9 @@ class SurfaceIceConcentrationJacobian(nn.Module):
         tf0: float = 0.0901,
         tf_s_linear: float = -0.0575,
         tf_s_pow: float = 1.710523e-3,
+        mask_var_name: str = "",
+        mask_min: float = 0.0,
+        mask_max: float = 1.0,
     ) -> None:
         super().__init__()
         if len(input_names) != 5:
@@ -95,6 +101,9 @@ class SurfaceIceConcentrationJacobian(nn.Module):
         self.tf0 = float(tf0)
         self.tf_s_linear = float(tf_s_linear)
         self.tf_s_pow = float(tf_s_pow)
+        self.mask_var_name = mask_var_name
+        self.mask_min = float(mask_min)
+        self.mask_max = float(mask_max)
 
     def _check_inputs(self, inputs: torch.Tensor, label: str) -> None:
         if inputs.dim() != 2 or inputs.shape[1] != 5:
@@ -159,23 +168,42 @@ class SurfaceIceConcentrationJacobian(nn.Module):
                 )
             dx = perturbations
 
-        mask = torch.ones(
+        mask_var = torch.ones(
             inputs.shape[0], 1, dtype=inputs.dtype, device=inputs.device
         )
-        jac = self.jac_physical(inputs, mask)
+        jac = self.jac_physical(inputs, mask_var)
         return torch.bmm(jac, dx.unsqueeze(2)).squeeze(2)
+
+    @torch.jit.export
+    def compute_mask(self, mask_var: torch.Tensor) -> torch.Tensor:
+        """Compute binary domain mask from raw background values.
+
+        Args:
+            mask_var: [nnodes, 1] — background values of the mask variable
+                      (CF name: self.mask_var_name).
+
+        Returns:
+            [nnodes, 1] float32 mask (1 = active, 0 = outside valid range).
+        """
+        if self.mask_var_name == "":
+            return torch.ones(mask_var.shape[0], 1, dtype=mask_var.dtype, device=mask_var.device)
+        v = mask_var[:, 0]
+        valid = (v >= self.mask_min) & (v <= self.mask_max)
+        return valid.unsqueeze(1).to(mask_var.dtype)
 
     @torch.jit.export
     def jac_physical(
         self,
         inputs: torch.Tensor,
-        mask: torch.Tensor,
+        mask_var: torch.Tensor,
     ) -> torch.Tensor:
         """Return d(aice) / d[sst, sss, hi, hs] for SABER C++."""
         self._check_inputs(inputs, "jac_physical")
-        sst_bg = inputs[:, 0]
-        sss_bg = inputs[:, 1]
-        hi_bg = inputs[:, 2]
-        hs_bg = inputs[:, 3]
+        mask = self.compute_mask(mask_var)
+        sst_bg  = inputs[:, 0]
+        sss_bg  = inputs[:, 1]
+        hi_bg   = inputs[:, 2]
+        hs_bg   = inputs[:, 3]
         aice_bg = inputs[:, 4]
-        return self._compute_jacobian(sst_bg, sss_bg, hi_bg, hs_bg, aice_bg, mask)
+        jac = self._compute_jacobian(sst_bg, sss_bg, hi_bg, hs_bg, aice_bg, mask)
+        return torch.where(torch.isfinite(jac), jac, torch.zeros_like(jac))

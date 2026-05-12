@@ -33,7 +33,7 @@ IN_NAMES: List[str] = [
     "sea_water_salinity",
     "sea_ice_area_fraction",
     "air_temperature",
-    "sea_ice_thickness",
+    "sea_ice_volume",
 ]
 OUT_NAMES: List[str] = ["sea_ice_concentration"]
 IN_LEVELS: List[int] = [0, 0, 0, 127, 0]

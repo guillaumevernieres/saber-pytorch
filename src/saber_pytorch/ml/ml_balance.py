@@ -18,15 +18,21 @@ The emulator must be a TorchScript module with:
     output_levels: List[int]  — vertical-level index for each output feature
 
   Method called by C++:
-    jac_physical(inputs: Tensor, mask: Tensor) -> Tensor
+    jac_physical(inputs: Tensor, mask_var: Tensor) -> Tensor
 
-    inputs : [nnodes, inputSize]   float32 — packed background state
-    mask   : [nnodes, 1]           float32 — pre-computed binary mask from SABER
-    return : [nnodes, outputSize, inputSize]  float32
+    inputs   : [nnodes, inputSize]  float32 — packed background state
+    mask_var : [nnodes, 1]          float32 — raw background values of the mask
+                                    variable (CF name stored in mask_var_name).
+                                    The module computes its own binary domain mask
+                                    from these values using the same threshold that
+                                    was applied during training (mask_mode,
+                                    min_ice_concentration).
+    return   : [nnodes, outputSize, inputSize]  float32
 
-The mask is already reduced to a per-node scalar by the C++ layer before
-being passed in.  It is NOT ancillary data that needs thresholding inside the
-model.
+  Extra attributes (not required by the base contract, but serialized):
+    mask_mode           : str   — "sea_ice" | "ocean" | "none"
+    mask_var_name       : str   — CF name of the variable passed as mask_var
+    min_ice_concentration: float — threshold used during training and at runtime
 
 Design
 ------
@@ -88,6 +94,10 @@ class FFNNSurfaceEmulator(nn.Module):
     output_names: List[str]
     input_levels: List[int]
     output_levels: List[int]
+    mask_var_name: str
+    mask_min: float
+    mask_max: float
+    mask_var_idx: int  # index of mask_var in input_names, or -1 if not an input
 
     def __init__(
         self,
@@ -98,19 +108,26 @@ class FFNNSurfaceEmulator(nn.Module):
         hidden_size: int = 64,
         hidden_layers: int = 3,
         activation: str = "gelu",
+        mask_var_name: str = "",
+        mask_min: float = 0.0,
+        mask_max: float = 1.0,
     ) -> None:
         """
         Args:
             input_names:   CF-standard name for each input feature.
-                           len(input_names) == FFNN input_size.
             output_names:  Exactly one output variable name.
             input_levels:  Vertical-level index for each input feature.
-                           Must have the same length as input_names.
             output_levels: Vertical-level index for each output feature.
-                           Must have the same length as output_names.
             hidden_size:   Neurons per hidden layer.
             hidden_layers: Number of hidden layers.
             activation:    Activation function name (gelu, relu, tanh, …).
+            mask_var_name: CF name of the background variable used to define the
+                           active domain (e.g. "sea_ice_area_fraction").  When
+                           empty, no masking is applied (all nodes are active).
+            mask_min:      Lower bound of the valid range (inclusive).  Nodes where
+                           mask_var < mask_min are zeroed in jac_physical.
+            mask_max:      Upper bound of the valid range (inclusive).  Nodes where
+                           mask_var > mask_max are zeroed in jac_physical.
         """
         super().__init__()
 
@@ -134,6 +151,14 @@ class FFNNSurfaceEmulator(nn.Module):
         self.output_names = list(output_names)
         self.input_levels = list(input_levels)
         self.output_levels = list(output_levels)
+        self.mask_var_name = mask_var_name
+        self.mask_min = mask_min
+        self.mask_max = mask_max
+        self.mask_var_idx = (
+            list(input_names).index(mask_var_name)
+            if mask_var_name and mask_var_name in input_names
+            else -1
+        )
 
         self.ffnn = FFNN(
             input_size=len(input_names),
@@ -177,27 +202,62 @@ class FFNNSurfaceEmulator(nn.Module):
     # ------------------------------------------------------------------
 
     @torch.jit.export
+    def compute_mask(self, mask_var: torch.Tensor) -> torch.Tensor:
+        """Compute binary domain mask from raw background values.
+
+        Nodes whose mask_var falls within [mask_min, mask_max] are active (1);
+        all others are inactive (0).  When mask_var_name is empty every node is
+        active regardless of mask_var contents.
+
+        Args:
+            mask_var: [nnodes, 1] — background values of the mask variable
+                      (CF name: self.mask_var_name).
+
+        Returns:
+            [nnodes, 1] float32 mask (1 = active, 0 = outside valid range).
+        """
+        if self.mask_var_name == "":
+            return torch.ones(mask_var.shape[0], 1, dtype=mask_var.dtype, device=mask_var.device)
+        v = mask_var[:, 0]
+        valid = (v >= self.mask_min) & (v <= self.mask_max)
+        return valid.unsqueeze(1).to(mask_var.dtype)
+
+    @torch.jit.export
     def jac_physical(
         self,
         inputs: torch.Tensor,
-        mask: torch.Tensor,
+        mask_var: torch.Tensor,
     ) -> torch.Tensor:
         """Jacobian from the background tensor assembled by SABER C++.
 
         Args:
-            inputs: [nnodes, inputSize]  — packed background state in physical units.
-            mask:   [nnodes, 1]          — pre-computed binary mask (1 = valid node,
-                                           0 = masked out).  Applied by the C++
-                                           TorchBalanceSurfaceEmulator before calling
-                                           this method; passed straight through here.
+            inputs:   [nnodes, inputSize] — packed background state in physical units.
+            mask_var: [nnodes, 1]         — background values of the mask variable
+                      (CF name: self.mask_var_name).  Pass a column of ones when
+                      mask_var_name is empty (no masking configured).
 
         Returns:
             jac: [nnodes, outputSize, inputSize]
-                 Jacobian ∂y_phys/∂x_phys, zeroed at masked nodes.
+                 Jacobian ∂y_phys/∂x_phys, zeroed outside [mask_min, mask_max].
         """
-        jac = self.ffnn._jac_physical(inputs)
-        # mask: [nnodes, 1] → [nnodes, 1, 1] broadcasts over [nnodes, out, in]
-        return jac * mask.unsqueeze(2)
+        # Prefer extracting the mask variable directly from inputs when it is
+        # one of the input features — this avoids relying on whatever the caller
+        # (e.g. SABER C++) passes as mask_var, which may be all-ones by default.
+        if self.mask_var_idx >= 0:
+            effective_mask_var = inputs[:, self.mask_var_idx:self.mask_var_idx + 1]
+        else:
+            effective_mask_var = mask_var
+        mask = self.compute_mask(effective_mask_var)
+        nnodes = inputs.shape[0]
+        jac = torch.zeros(
+            nnodes, self.ffnn.output_size, self.ffnn.input_size,
+            dtype=inputs.dtype, device=inputs.device,
+        )
+        valid = mask[:, 0] > 0
+        valid_inputs = inputs[valid]
+        if valid_inputs.shape[0] > 0:
+            jac[valid] = self.ffnn._jac_physical(valid_inputs)
+        return torch.where(torch.isfinite(jac), jac, torch.zeros_like(jac))
 
 
 class FFNNVerticalEmulator(nn.Module):

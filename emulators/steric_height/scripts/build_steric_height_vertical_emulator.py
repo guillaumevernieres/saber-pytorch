@@ -44,6 +44,9 @@ def build_and_save(
     dz_name: str = "sea_water_cell_thickness",
     ssh_name: str = "sea_surface_height_above_geoid",
     rho0: float = 1025.0,
+    mask_var_name: str = "",
+    mask_min: float = 0.0,
+    mask_max: float = 1.0,
 ) -> None:
     input_names: List[str] = [T_name, S_name, dz_name]
     output_names: List[str] = [ssh_name]
@@ -52,6 +55,9 @@ def build_and_save(
         input_names=input_names,
         output_names=output_names,
         rho0=rho0,
+        mask_var_name=mask_var_name,
+        mask_min=mask_min,
+        mask_max=mask_max,
     )
     emulator.eval()
 
@@ -61,11 +67,14 @@ def build_and_save(
     loaded = torch.jit.load(output_path)
     nlevels = 4
     test_inputs = torch.randn(2, 3 * nlevels)
-    test_mask = torch.ones(2, 1)
+    if mask_var_name:
+        test_mask_var = torch.full((2, 1), (mask_min + mask_max) / 2.0)
+    else:
+        test_mask_var = torch.ones(2, 1)
     test_col_indices = torch.arange(3 * nlevels, dtype=torch.long)
     test_row_indices = torch.zeros_like(test_col_indices)
     test_jac = loaded.jac_physical(
-        test_inputs, test_mask, test_row_indices, test_col_indices
+        test_inputs, test_mask_var, test_row_indices, test_col_indices
     )
     expected_shape = (2, 3 * nlevels)
     if tuple(test_jac.shape) != expected_shape:
@@ -77,6 +86,9 @@ def build_and_save(
     print(f"Saved: {output_path}")
     print(f"  input_names : {input_names}")
     print(f"  output_names: {output_names}")
+    print(f"  mask_var_name: {mask_var_name or '(none)'}")
+    if mask_var_name:
+        print(f"  mask range  : [{mask_min}, {mask_max}]")
     print(f"  inputs tensor at runtime: [nnodes, 3*nlevels]")
     print(f"    [:, 0*n:1*n] = {T_name}")
     print(f"    [:, 1*n:2*n] = {S_name}")
@@ -97,6 +109,15 @@ def main() -> None:
     parser.add_argument("--dz-name", default="sea_water_cell_thickness")
     parser.add_argument("--ssh-name", default="sea_surface_height_above_geoid")
     parser.add_argument("--rho0", type=float, default=1025.0)
+    parser.add_argument(
+        "--mask-var", default="",
+        help="CF name of the background variable used to gate the Jacobian "
+             "(e.g. 'sea_water_potential_temperature'). Omit for no masking.",
+    )
+    parser.add_argument("--mask-min", type=float, default=0.0,
+                        help="Lower bound of the active range (inclusive).")
+    parser.add_argument("--mask-max", type=float, default=1.0,
+                        help="Upper bound of the active range (inclusive).")
     args = parser.parse_args()
 
     build_and_save(
@@ -106,6 +127,9 @@ def main() -> None:
         dz_name=args.dz_name,
         ssh_name=args.ssh_name,
         rho0=args.rho0,
+        mask_var_name=args.mask_var,
+        mask_min=args.mask_min,
+        mask_max=args.mask_max,
     )
 
 

@@ -10,8 +10,8 @@ from saber_pytorch.physics.surface_ice_concentration import (
 INPUT_NAMES: List[str] = [
     "sea_water_potential_temperature",
     "sea_water_salinity",
-    "sea_ice_thickness",
-    "sea_ice_snow_thickness",
+    "sea_ice_volume",
+    "sea_ice_snow_volume",
     "sea_ice_area_fraction",
 ]
 OUTPUT_NAMES: List[str] = ["sea_ice_area_fraction"]

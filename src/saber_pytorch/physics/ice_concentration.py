@@ -34,10 +34,13 @@ The local freezing temperature is approximated as:
     S = max(SSS, 0)
     Tf = tf0 + tf_s_linear * S + tf_s_pow * S * sqrt(S)
 
-The Jacobian is active only when the background state is close enough to the
-freezing point:
+The Jacobian is active whenever SST is at or below the freezing point plus a
+warm margin, i.e. anywhere ice could plausibly be present:
 
-    active = |SST - Tf| <= freezing_tolerance
+    active = SST <= Tf + freezing_tolerance
+
+This is a one-sided condition: very cold states (SST << Tf) remain active, and
+only clearly warm states (SST > Tf + freezing_tolerance) are suppressed.
 
 Partial derivatives for active nodes:
 
@@ -103,6 +106,9 @@ class SurfaceIceConcentrationEmulator(nn.Module):
     tf_s_linear: float
     tf_s_pow: float
     freezing_tolerance: float
+    mask_var_name: str
+    mask_min: float
+    mask_max: float
 
     def __init__(
         self,
@@ -120,6 +126,9 @@ class SurfaceIceConcentrationEmulator(nn.Module):
         tf_s_linear: float = -0.0575,
         tf_s_pow: float = 1.710523e-3,
         freezing_tolerance: float = 1.0,
+        mask_var_name: str = "",
+        mask_min: float = 0.0,
+        mask_max: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -177,6 +186,9 @@ class SurfaceIceConcentrationEmulator(nn.Module):
         self.tf_s_linear = float(tf_s_linear)
         self.tf_s_pow = float(tf_s_pow)
         self.freezing_tolerance = float(freezing_tolerance)
+        self.mask_var_name = mask_var_name
+        self.mask_min = float(mask_min)
+        self.mask_max = float(mask_max)
 
     def _freezing_temperature(self, sss_bg: torch.Tensor) -> torch.Tensor:
         sss_eff = torch.clamp(sss_bg, min=0.0)
@@ -199,7 +211,7 @@ class SurfaceIceConcentrationEmulator(nn.Module):
         sss_eff = torch.clamp(sss_bg, min=0.0)
         tf_bg = self._freezing_temperature(sss_bg)
         dTf_dS = self.tf_s_linear + 1.5 * self.tf_s_pow * torch.sqrt(sss_eff)
-        active = (torch.abs(sst_bg - tf_bg) <= self.freezing_tolerance).to(mask.dtype)
+        active = (sst_bg <= tf_bg + self.freezing_tolerance).to(mask.dtype)
         effective_mask = mask * active.unsqueeze(1)
 
         hi_eff = torch.clamp(hi_bg, min=0.0)
@@ -235,10 +247,10 @@ class SurfaceIceConcentrationEmulator(nn.Module):
         if perturbations.shape[1] != 4:
             raise ValueError("forward expects perturbations with shape [nnodes, 4]")
 
-        mask = torch.ones(
+        mask_var = torch.ones(
             inputs.shape[0], 1, dtype=inputs.dtype, device=inputs.device
         )
-        jac = self.jac_physical(inputs, mask)  # [nnodes, 1, 4]
+        jac = self.jac_physical(inputs, mask_var)  # [nnodes, 1, 4]
         return torch.bmm(jac, perturbations.unsqueeze(2)).squeeze(2)
 
     @torch.jit.export
@@ -256,16 +268,34 @@ class SurfaceIceConcentrationEmulator(nn.Module):
         return self._compute_jacobian(sst_bg, sss_bg, hi_bg, hs_bg, aice_bg, mask)
 
     @torch.jit.export
+    def compute_mask(self, mask_var: torch.Tensor) -> torch.Tensor:
+        """Compute binary domain mask from raw background values.
+
+        Args:
+            mask_var: [nnodes, 1] — background values of the mask variable
+                      (CF name: self.mask_var_name).
+
+        Returns:
+            [nnodes, 1] float32 mask (1 = active, 0 = outside valid range).
+        """
+        if self.mask_var_name == "":
+            return torch.ones(mask_var.shape[0], 1, dtype=mask_var.dtype, device=mask_var.device)
+        v = mask_var[:, 0]
+        valid = (v >= self.mask_min) & (v <= self.mask_max)
+        return valid.unsqueeze(1).to(mask_var.dtype)
+
+    @torch.jit.export
     def jac_physical(
         self,
         inputs: torch.Tensor,
-        mask: torch.Tensor,
+        mask_var: torch.Tensor,
     ) -> torch.Tensor:
         """Jacobian from the 5-column packed background tensor assembled by SABER C++.
 
         Args:
-            inputs: [nnodes, 5] packed as [sst_bg, sss_bg, hi_bg, hs_bg, aice_prior].
-            mask:   [nnodes, 1] binary validity mask (1 = active node).
+            inputs:   [nnodes, 5] packed as [sst_bg, sss_bg, hi_bg, hs_bg, aice_prior].
+            mask_var: [nnodes, 1] — background values of the mask variable
+                      (CF name: self.mask_var_name).
 
         Returns:
             jac: [nnodes, 1, 4]  d(aice)/d[sst, sss, hi, hs].
@@ -273,9 +303,11 @@ class SurfaceIceConcentrationEmulator(nn.Module):
         if inputs.shape[1] != 5:
             raise ValueError("jac_physical expects inputs with shape [nnodes, 5]")
 
-        sst_bg = inputs[:, 0]
-        sss_bg = inputs[:, 1]
-        hi_bg = inputs[:, 2]
-        hs_bg = inputs[:, 3]
+        mask = self.compute_mask(mask_var)
+        sst_bg  = inputs[:, 0]
+        sss_bg  = inputs[:, 1]
+        hi_bg   = inputs[:, 2]
+        hs_bg   = inputs[:, 3]
         aice_bg = inputs[:, 4]
-        return self._compute_jacobian(sst_bg, sss_bg, hi_bg, hs_bg, aice_bg, mask)
+        jac = self._compute_jacobian(sst_bg, sss_bg, hi_bg, hs_bg, aice_bg, mask)
+        return torch.where(torch.isfinite(jac), jac, torch.zeros_like(jac))

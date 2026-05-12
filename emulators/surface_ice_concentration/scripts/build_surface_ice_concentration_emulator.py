@@ -19,7 +19,13 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 from saber_pytorch.physics.ice_concentration import SurfaceIceConcentrationEmulator  # noqa: E402
+from saber_pytorch.ml.cf_mappings import CF_ATM, CF_OCN  # noqa: E402
 
+_CF = {**CF_ATM, **CF_OCN}
+
+# Fixed packed order: [sst, sss, hi, hs, aice_prior]
+_DEFAULT_INPUT_NAMES  = ",".join([_CF["sst"], _CF["sss"], _CF["hi"], _CF["hs"], _CF["aice"]])
+_DEFAULT_OUTPUT_NAMES = _CF["aice"]
 
 # input tensor has 5 columns (background state incl. aice_prior);
 # jac_physical returns [nnodes, 1, 4] (excludes aice_prior column)
@@ -57,6 +63,9 @@ def build_and_save(
     tf_s_linear: float,
     tf_s_pow: float,
     freezing_tolerance: float,
+    mask_var_name: str = "",
+    mask_min: float = 0.0,
+    mask_max: float = 1.0,
 ) -> None:
     emulator = SurfaceIceConcentrationEmulator(
         input_names=input_names,
@@ -73,6 +82,9 @@ def build_and_save(
         tf_s_linear=tf_s_linear,
         tf_s_pow=tf_s_pow,
         freezing_tolerance=freezing_tolerance,
+        mask_var_name=mask_var_name,
+        mask_min=mask_min,
+        mask_max=mask_max,
     ).eval()
 
     scripted = torch.jit.script(emulator)
@@ -80,8 +92,11 @@ def build_and_save(
 
     loaded = torch.jit.load(output_path)
     test_x = torch.randn(4, _INPUT_SIZE)
-    test_mask = torch.ones(4, 1)
-    jac = loaded.jac_physical(test_x, test_mask)
+    if mask_var_name:
+        test_mask_var = torch.full((4, 1), (mask_min + mask_max) / 2.0)
+    else:
+        test_mask_var = torch.ones(4, 1)
+    jac = loaded.jac_physical(test_x, test_mask_var)
     expected_shape = (4, 1, _OUTPUT_JAC_COLS)
     if tuple(jac.shape) != expected_shape:
         raise RuntimeError(
@@ -93,6 +108,9 @@ def build_and_save(
     print(f"  input_levels ({_INPUT_SIZE}): {input_levels}")
     print(f"  output_names      (1): {output_names}")
     print(f"  output_levels     (1): {output_levels}")
+    print(f"  mask_var_name        : {mask_var_name or '(none)'}")
+    if mask_var_name:
+        print(f"  mask range           : [{mask_min}, {mask_max}]")
     print(
         "  coefficients: "
         f"alpha_t={alpha_t}, alpha_hi={alpha_hi}, alpha_hs={alpha_hs}, "
@@ -110,15 +128,16 @@ def main() -> None:
     parser.add_argument("--output", required=True, help="Output .ts path")
     parser.add_argument(
         "--input-names",
-        default="sea_water_potential_temperature,sea_water_salinity,sea_ice_thickness,sea_ice_snow_thickness,sea_ice_area_fraction",
+        default=_DEFAULT_INPUT_NAMES,
         help=(
-            "Comma-separated input variable names in packed order [sst,sss,hi,hs,aice_prior]"
+            "Comma-separated CF input variable names in packed order "
+            "[sst, sss, hi, hs, aice_prior]. Defaults derived from cf_mappings.py."
         ),
     )
     parser.add_argument(
         "--output-names",
-        default="sea_ice_area_fraction",
-        help="Comma-separated output variable names (exactly one)",
+        default=_DEFAULT_OUTPUT_NAMES,
+        help="Comma-separated CF output variable names (exactly one).",
     )
     parser.add_argument(
         "--input-levels",
@@ -147,6 +166,15 @@ def main() -> None:
         default=1.0,
         help="Maximum |sst_bg - Tf(sss_bg)| allowed before the Jacobian is zeroed",
     )
+    parser.add_argument(
+        "--mask-var", default="",
+        help="CF name of the background variable used to gate the Jacobian "
+             "(e.g. 'sea_ice_area_fraction'). Omit for no masking.",
+    )
+    parser.add_argument("--mask-min", type=float, default=0.0,
+                        help="Lower bound of the active range (inclusive).")
+    parser.add_argument("--mask-max", type=float, default=1.0,
+                        help="Upper bound of the active range (inclusive).")
     args = parser.parse_args()
 
     build_and_save(
@@ -165,6 +193,9 @@ def main() -> None:
         tf_s_linear=args.tf_s_linear,
         tf_s_pow=args.tf_s_pow,
         freezing_tolerance=args.freezing_tolerance,
+        mask_var_name=args.mask_var,
+        mask_min=args.mask_min,
+        mask_max=args.mask_max,
     )
 
 

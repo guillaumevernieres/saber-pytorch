@@ -12,8 +12,10 @@ CF_ATM = {
     "tair": "air_temperature",
     "uatm": "eastward_wind",
     "vatm": "northward_wind",
-    "tsfc": "skin_temperature_at_surface",
+    "tsfc": "snow_ice_surface_temperature",
     "qref": "water_vapor_mixing_ratio_wrt_moist_air",
+    "flwdn": "surface_downwelling_longwave_flux_in_air",
+    "fswdn": "surface_downwelling_shortwave_flux_in_air",
     "pressfc": "air_pressure_at_surface",
 }
 
@@ -26,11 +28,12 @@ CF_OCN = {
     "sss": "sea_water_salinity",
     "sea_water_salinity": "sea_water_salinity",
     "aice": "sea_ice_area_fraction",
-    "hi": "sea_ice_thickness",
-    "hs": "sea_ice_snow_thickness",
+    "hi": "sea_ice_volume",
+    "hs": "sea_ice_snow_volume",
     "thick": "sea_water_cell_thickness",
     "sea_water_cell_thickness": "sea_water_cell_thickness",
     "h": "h",           # MOM6 layer thickness (alternative name)
+    "h_surface": "sea_water_cell_thickness",  # Surface layer thickness only
     "sice": "sea_ice_salinity",
     "uocn": "eastward_sea_water_velocity",
     "vocn": "northward_sea_water_velocity",

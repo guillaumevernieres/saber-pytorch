@@ -94,10 +94,10 @@ class UFSEmulatorDataBuilder:
             lat = self._read_var(da, self.cf_atm['lat']).astype(np.float32)
             lon = self._read_var(da, self.cf_atm['lon']).astype(np.float32)
         else:
-            # Coordinates from ocean file
-            # Try different possible coordinate names
-            lat_names = ['latitude', 'geolat', 'yh', 'ny', 'lat', 'y', 'yaxis_1', 'yaxis_2']
-            lon_names = ['longitude', 'geolon', 'xh', 'nx', 'lon', 'x', 'xaxis_1', 'xaxis_2']
+            # Coordinates from ocean/ice file
+            # Supports MOM6 (yh/xh, geolat/geolon) and CICE (TLAT/TLON) grids.
+            lat_names = ['latitude', 'geolat', 'TLAT', 'yh', 'ny', 'lat', 'y', 'yaxis_1', 'yaxis_2']
+            lon_names = ['longitude', 'geolon', 'TLON', 'xh', 'nx', 'lon', 'x', 'xaxis_1', 'xaxis_2']
 
             lat = None
             for name in lat_names:
@@ -125,11 +125,23 @@ class UFSEmulatorDataBuilder:
                 else:
                     raise ValueError(f"Longitude coordinate not found. Tried: {lon_names}. Available: {list(do.variables.keys())[:20]}")
 
-        # Broadcast to 2D
-        lat2 = np.repeat(lat[:, None], lon.size, axis=1)
-        lon2 = np.repeat(lon[None, :], lat.size, axis=0)
-        data['lat'] = lat2.flatten()
-        data['lon'] = lon2.flatten()
+        # Build flattened coordinates for downstream filtering/training
+        if lat.ndim == 2 and lon.ndim == 2:
+            if lat.shape != lon.shape:
+                raise ValueError(
+                    f"Latitude/longitude shapes must match for 2D coordinates, got {lat.shape} and {lon.shape}"
+                )
+            data['lat'] = lat.flatten()
+            data['lon'] = lon.flatten()
+        elif lat.ndim == 1 and lon.ndim == 1:
+            lat2 = np.repeat(lat[:, None], lon.size, axis=1)
+            lon2 = np.repeat(lon[None, :], lat.size, axis=0)
+            data['lat'] = lat2.flatten()
+            data['lon'] = lon2.flatten()
+        else:
+            raise ValueError(
+                f"Unsupported coordinate dimensions: lat.ndim={lat.ndim}, lon.ndim={lon.ndim}"
+            )
 
         # Read atmospheric variables if atmosphere file is provided
         if da is not None:
@@ -166,10 +178,15 @@ class UFSEmulatorDataBuilder:
         vcfg = self.config.get('variables', {})
         VERTICAL_LEVEL_LIMIT = int(vcfg.get('num_levels', 50))
 
-        # Dynamically read all ocean/ice variables needed
+        # Dynamically read all ocean/ice variables needed.
+        # When no atm file was provided, also include any atmospheric variables
+        # that were not already read (e.g. Tair_h, flwdn_h in CICE files).
         ocn_vars_needed = set()
         for var in self.input_variables + self.output_variables:
             if var in self.cf_ocn:
+                ocn_vars_needed.add(var)
+            elif da is None and var in self.cf_atm:
+                # No atm file supplied – try to find the field in the ocean/ice file
                 ocn_vars_needed.add(var)
 
         # Track if we have 3D data to get spatial dimensions
@@ -185,9 +202,33 @@ class UFSEmulatorDataBuilder:
         thickness_vars = {
             'h', 'ho', 'thick', 'thkcello', 'sea_water_cell_thickness'
         }
+        # Variables that are by definition surface-only: extract level 0 only
+        # even if the file stores them as 3D arrays.
+        surface_only_vars = {
+            'sst', 'sss', 'h_surface', 'aice', 'hi', 'hs', 'sice', 'uocn', 'vocn',
+        }
+        sea_ice_aliases = {
+            'aice': ['aice_h'],
+            'hi': ['hi_h'],
+            'hs': ['hs_h'],
+            'sst': ['sst_h'],
+            'sss': ['sss_h'],
+            'sice': ['sice_h'],
+            'uocn': ['uocn_h'],
+            'vocn': ['vocn_h'],
+            'fswdn': ['fswdn_h'],
+            'flwdn': ['flwdn_h'],
+            'tair': ['Tair_h'],
+            'tsfc': ['Tsfc_h'],
+            'qref': ['Qref_h'],
+            'uatm': ['uatm_h'],
+            'vatm': ['vatm_h'],
+        }
 
         for var in ocn_vars_needed:
-            cf_name = self.cf_ocn[var]
+            # Variables may live in cf_ocn or (when atm file absent) in cf_atm;
+            # use the var name itself as the fallback cf_name.
+            cf_name = self.cf_ocn.get(var, self.cf_atm.get(var, var))
             var_data = None
 
             # Special handling for common MOM6 variables - try multiple possible names
@@ -250,7 +291,7 @@ class UFSEmulatorDataBuilder:
                         available_vars = all_vars
                         raise ValueError(f"Thickness variable not found and cannot compute from depth. Tried: {possible_names}. Available depth coords tried: {depth_coord_names}. All variables: {available_vars}")
             elif var in temperature_vars:
-                possible_names = ['Temp', 'temp', 'sea_water_potential_temperature', 'thetao', 'temperature']
+                possible_names = ['Temp', 'temp', 'sea_water_potential_temperature', 'thetao', 'temperature', f'{var}_h']
                 for name in possible_names:
                     if name in do.variables:
                         cf_name = name
@@ -261,7 +302,7 @@ class UFSEmulatorDataBuilder:
                     available_vars = list(do.variables.keys())
                     raise ValueError(f"Temperature variable not found. Tried: {possible_names}. Available variables: {available_vars[:20]}...")
             elif var in salinity_vars:
-                possible_names = ['Salt', 'so', 'sea_water_salinity', 'salt', 'salinity']
+                possible_names = ['Salt', 'so', 'sea_water_salinity', 'salt', 'salinity', f'{var}_h']
                 for name in possible_names:
                     if name in do.variables:
                         cf_name = name
@@ -271,10 +312,23 @@ class UFSEmulatorDataBuilder:
                 if var_data is None:
                     available_vars = list(do.variables.keys())
                     raise ValueError(f"Salinity variable not found. Tried: {possible_names}. Available variables: {available_vars[:20]}...")
-            elif cf_name in do.variables:
-                var_data = do.variables[cf_name]
             else:
-                raise ValueError(f"Required ocean variable '{var}' (CF name: '{cf_name}') not found in {ocn_file}")
+                possible_names = [cf_name, var, f'{var}_h'] + sea_ice_aliases.get(var, [])
+                seen = set()
+                for name in possible_names:
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    if name in do.variables:
+                        cf_name = name
+                        var_data = do.variables[name]
+                        print(f"  Found variable '{var}' using name '{name}'")
+                        break
+                if var_data is None:
+                    raise ValueError(
+                        f"Required ocean variable '{var}' (CF name: '{self.cf_ocn[var]}') "
+                        f"not found in {ocn_file}"
+                    )
 
             # Special handling for computed thickness (when var_data is None but we computed it)
             if var_data is None and var in thickness_vars and '_computed_thickness' in data:
@@ -290,6 +344,10 @@ class UFSEmulatorDataBuilder:
 
                 if len(raw_data.shape) == 4 and raw_data.shape[0] == 1:
                     # Shape: (time=1, z_l, yh, xh) -> squeeze to (z_l, yh, xh)
+                    raw_data = raw_data.squeeze(axis=0)
+                    print(f"  Squeezed time dimension from '{cf_name}': {var_data.shape} -> {raw_data.shape}")
+                elif len(raw_data.shape) == 3 and raw_data.shape[0] == 1:
+                    # Sea-ice surface fields are often (time=1, nj, ni)
                     raw_data = raw_data.squeeze(axis=0)
                     print(f"  Squeezed time dimension from '{cf_name}': {var_data.shape} -> {raw_data.shape}")
 
@@ -308,9 +366,22 @@ class UFSEmulatorDataBuilder:
 
                     # Limit to first 50 levels
                     full_data = raw_data.astype(np.float32)[..., :VERTICAL_LEVEL_LIMIT]
+                    # Surface-only variables: discard all levels except the first
+                    if var in surface_only_vars:
+                        full_data = full_data[..., :1]
+                        print(f"  Surface variable '{var}': using level 0 only")
+                    var_nlat, var_nlon, var_nlevs = full_data.shape
                     if nlat is None:
-                        nlat, nlon, nlevs = full_data.shape
-                    nlevs = min(nlevs, VERTICAL_LEVEL_LIMIT)
+                        nlat, nlon = var_nlat, var_nlon
+                    elif var_nlat != nlat or var_nlon != nlon:
+                        raise ValueError(
+                            f"Inconsistent horizontal dimensions for '{cf_name}': "
+                            f"got ({var_nlat}, {var_nlon}), expected ({nlat}, {nlon})"
+                        )
+                    if nlevs is None:
+                        nlevs = var_nlevs
+                    else:
+                        nlevs = max(nlevs, var_nlevs)
 
                     # Special handling for 'h' (thickness)
                     if var in thickness_vars:
@@ -321,15 +392,15 @@ class UFSEmulatorDataBuilder:
                             print(f"  INFO: Thickness has {n_nan} NaN values ({100*n_nan/n_total:.1f}%) - land points")
 
                         # Store thickness as-is (don't convert to depth for now - simpler)
-                        data[var] = full_data.reshape(nlat * nlon, nlevs)
-                        data[f'{var}_nlevs'] = nlevs
+                        data[var] = full_data.reshape(nlat * nlon, var_nlevs)
+                        data[f'{var}_nlevs'] = var_nlevs
 
                         # Compute depth as cumulative sum of thickness for each profile
                         # depth[i, k] = sum_{j=0}^k h[i, j]
-                        thickness_profiles = data[var]  # shape (n_profiles, nlevs)
+                        thickness_profiles = data[var]  # shape (n_profiles, var_nlevs)
                         depth_profiles = np.cumsum(thickness_profiles, axis=1)
-                        data['depth'] = depth_profiles  # shape (n_profiles, nlevs)
-                        data['depth_nlevs'] = nlevs
+                        data['depth'] = depth_profiles  # shape (n_profiles, var_nlevs)
+                        data['depth_nlevs'] = var_nlevs
 
                         # Also use for surface masking
                         h_data_3d = full_data
@@ -340,8 +411,8 @@ class UFSEmulatorDataBuilder:
                             pct = 100 * n_nan / full_data.size
                             print(f"  INFO: '{cf_name}' has {n_nan} NaN values ({pct:.1f}%) - land points")
 
-                        data[var] = full_data.reshape(nlat * nlon, nlevs)
-                        data[f'{var}_nlevs'] = nlevs
+                        data[var] = full_data.reshape(nlat * nlon, var_nlevs)
+                        data[f'{var}_nlevs'] = var_nlevs
                 elif len(raw_data.shape) == 1:
                     # 1D coordinate variable (e.g., z_l depth levels)
                     # This needs to be broadcast to all spatial points
@@ -364,7 +435,8 @@ class UFSEmulatorDataBuilder:
             data['_nlevs'] = nlevs
 
         # Always read 'thick' for masking even if not in input/output (backward compatibility)
-        # If we already read 'h' and converted to depth, use h_data_3d for masking
+        # If we already read 'h' and converted to depth, use h_data_3d for masking.
+        # For CICE-only files use tmask (1=ocean) which marks all ocean/ice points valid.
         if 'thick' not in data:
             if h_data_3d is not None:
                 # Use surface layer thickness from h for masking
@@ -375,13 +447,35 @@ class UFSEmulatorDataBuilder:
                     data['thick'] = thick_raw[:, :, 0].astype(np.float32).flatten()
                 else:
                     data['thick'] = thick_raw[:].astype(np.float32).flatten()
+            elif 'tmask' in do.variables:
+                # CICE files carry tmask (1=ocean, 0=land). Use it directly: give
+                # ocean points a nominal thickness of 1.0 so the > 0 check passes.
+                tmask_raw = self._read_var(do, 'tmask')
+                if np.ma.is_masked(tmask_raw):
+                    tmask_raw = np.ma.filled(tmask_raw, 0.0)
+                if tmask_raw.ndim == 2:
+                    tmask_flat = tmask_raw.astype(np.float32).flatten()
+                else:
+                    tmask_flat = tmask_raw.astype(np.float32).flatten()
+                data['thick'] = np.where(tmask_flat > 0.5, 1.0, np.nan).astype(np.float32)
+                print("  Using CICE tmask for ocean/ice point masking")
+            elif 'hi' in data:
+                # Last resort: use ice thickness (only ice-covered points pass mask > 0)
+                data['thick'] = data['hi'].astype(np.float32)
 
-        # Mask: thickness validity (0 < thick <= 500) AND tair bounds (183.15 to 333.15 K)
-        # Only apply tair bounds if tair was actually read
+        # Mask: thickness validity (0 < thick <= 500) AND tair sanity bounds.
+        # tair may be in Kelvin (NWP atm files, 183–333 K) or Celsius (CICE Tair_h, -90–60 C).
+        # Detect units by median: if median < 100 assume Celsius, else Kelvin.
         # NaN values (from masked arrays) are excluded by np.isfinite()
         if 'tair' in data and 'thick' in data:
             thick_valid = np.isfinite(data['thick']) & (data['thick'] > 0.0) & (data['thick'] <= 500.0)
-            tair_valid = (data['tair'] >= 183.15) & (data['tair'] <= 333.15)
+            tair_finite = data['tair'][np.isfinite(data['tair'])]
+            if len(tair_finite) > 0 and float(np.median(tair_finite)) < 100.0:
+                # Celsius units (CICE Tair_h)
+                tair_valid = np.isfinite(data['tair']) & (data['tair'] >= -90.0) & (data['tair'] <= 60.0)
+            else:
+                # Kelvin units (NWP atmosphere file)
+                tair_valid = np.isfinite(data['tair']) & (data['tair'] >= 183.15) & (data['tair'] <= 333.15)
             data['mask'] = (thick_valid & tair_valid).astype(np.int32)
         elif 'thick' in data:
             # Treat NaN as invalid (masked out)

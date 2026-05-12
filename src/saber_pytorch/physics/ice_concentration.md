@@ -38,13 +38,11 @@ Let:
 - `Tf(sss) = tf0 + tf_s_linear * sss_eff + tf_s_pow * sss_eff * sqrt(sss_eff)`
 - `dTf_dS = tf_s_linear + 1.5 * tf_s_pow * sqrt(sss_eff)`
 
-The emulator is active only near the local freezing point. Define the freezing mismatch:
+The emulator is active whenever SST is at or below the freezing point plus a warm margin (one-sided condition):
 
-- `delta_freeze = abs(sst - Tf(sss))`
+- `active = 1` if `sst <= Tf(sss) + freezing_tolerance`, else `0`
 
-and the node-activity flag:
-
-- `active = 1` if `delta_freeze <= freezing_tolerance`, else `0`
+This keeps the balance active for all cold and near-freezing states (where ice can be present) and suppresses it only when SST is clearly above the local freezing point.
 
 Then the partial derivatives are:
 
@@ -109,7 +107,7 @@ SurfaceIceConcentrationEmulator(
 - `tf0`: constant term in the salinity-dependent freezing-temperature approximation
 - `tf_s_linear`: linear salinity term in the freezing-temperature approximation
 - `tf_s_pow`: `S^(3/2)` coefficient in the freezing-temperature approximation
-- `freezing_tolerance` (>= 0): maximum allowed `|sst - Tf(sss)|` before the Jacobian is zeroed
+- `freezing_tolerance` (>= 0): warm margin above `Tf(sss)`; the Jacobian is zeroed only when `sst > Tf(sss) + freezing_tolerance`
 
 ## Sign Expectations
 

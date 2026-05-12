@@ -42,7 +42,7 @@ variables:
 
 domain:
   mask_mode: sea_ice           # train on sea-ice-covered points only
-  min_ice_concentration: 0.0   # include all ice fractions ≥ 0
+  min_ice_concentration: 0.00001   # include all ice fractions ≥ 0
 
 data:
   data_path: data/aice_training.npz

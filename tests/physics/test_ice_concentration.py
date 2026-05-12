@@ -10,7 +10,7 @@ from saber_pytorch.physics.ice_concentration import SurfaceIceConcentrationEmula
 NNODES = 12
 SST_NAME = "sea_surface_temperature"
 SSS_NAME = "sea_surface_salinity"
-HI_NAME = "sea_ice_thickness"
+HI_NAME = "sea_ice_volume"
 HS_NAME = "surface_snow_thickness"
 AICE_NAME = "sea_ice_area_fraction"
 OUT_NAME = "sea_ice_area_fraction"
@@ -205,6 +205,20 @@ def test_jacobian_nonzero_when_near_freezing_point():
         torch.tensor([[near_sst, sss.item(), 0.5, 0.1, 0.5]]), mask
     )
     assert torch.any(jac != 0.0)
+
+
+def test_jacobian_nonzero_when_sst_well_below_freezing():
+    """SST well below Tf must remain active (one-sided condition)."""
+    em = make_emulator()
+    mask = torch.ones(1, 1)
+    sss = torch.tensor(34.0)
+    tf = em.tf0 + em.tf_s_linear * sss + em.tf_s_pow * sss * torch.sqrt(sss)
+    cold_sst = tf.item() - 1.5  # more than freezing_tolerance below Tf
+    jac = em.jac_physical(
+        torch.tensor([[cold_sst, sss.item(), 0.5, 0.1, 0.5]]), mask
+    )
+    assert torch.any(jac != 0.0)
+    assert jac[0, 0, 0].item() < 0.0  # d/dSST must be negative
 
 
 # ------------------------------------------------------------------
